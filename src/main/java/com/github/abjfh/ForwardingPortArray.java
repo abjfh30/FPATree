@@ -50,28 +50,6 @@ public class ForwardingPortArray<V> {
         }
     }
 
-    public void compactTable() {
-        if (table.isEmpty()) {
-            return;
-        }
-
-        bitSet = new BitSet(table.size());
-        List<FPANode<V>> newTable = new ArrayList<>();
-        FPANode<V> lastAdded = table.get(0);
-        newTable.add(lastAdded);
-        bitSet.set(0);
-
-        for (int i = 1; i < table.size(); i++) {
-            FPANode<V> currentNode = table.get(i);
-            if (!currentNode.equals(lastAdded)) {
-                newTable.add(currentNode);
-                lastAdded = currentNode;
-                bitSet.set(i);
-            }
-        }
-        table = newTable;
-    }
-
     @Override
     public boolean equals(Object o) {
         if (o == null || getClass() != o.getClass()) return false;
