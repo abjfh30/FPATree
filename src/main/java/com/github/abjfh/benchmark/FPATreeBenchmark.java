@@ -7,11 +7,15 @@ import com.github.abjfh.TrieToFPAConverter;
 
 import org.openjdk.jmh.annotations.*;
 import org.openjdk.jmh.infra.Blackhole;
+import org.openjdk.jmh.results.format.ResultFormatType;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
 import org.openjdk.jmh.runner.options.Options;
 import org.openjdk.jmh.runner.options.OptionsBuilder;
 
+import java.io.BufferedReader;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 
@@ -28,7 +32,7 @@ import java.util.concurrent.TimeUnit;
  * </ul>
  */
 @BenchmarkMode(Mode.Throughput)
-@OutputTimeUnit(TimeUnit.SECONDS)
+@OutputTimeUnit(TimeUnit.MILLISECONDS)
 @Warmup(iterations = 3, time = 1)
 @Measurement(iterations = 5, time = 1)
 @Fork(1)
@@ -41,38 +45,72 @@ public class FPATreeBenchmark {
                         .include(com.github.abjfh.benchmark.FPATreeBenchmark.class.getSimpleName())
                         .shouldDoGC(false)
                         .jvmArgsAppend("-Xmx4G", "-Xms4G")
+                        .resultFormat(ResultFormatType.JSON)
                         .build();
 
         new Runner(opt).run();
     }
 
-    // ==================== 测试数据生成 ====================
+    // ==================== 真实AS路径数据测试 (aspat.csv) ====================
 
     @State(Scope.Benchmark)
-    public static class LargeData {
-        FPATree<String[]> fpaTree;
+    public static class RealASData {
+        FPATree<String> fpaTree;
         byte[][] testIps;
         int[] testIpsAsInt;
+        int entryCount;
 
         @Setup(Level.Trial)
         public void setup() {
-            BitTrie<String[]> trie = new BitTrie<>();
-            testIps = new byte[100000][4];
-            testIpsAsInt = new int[100000];
+            String csvPath = "data/aspat.csv";
+            BitTrie<String> trie = new BitTrie<>();
 
-            Random random = new Random(42);
-            for (int i = 0; i < 10000; i++) {
-                int a = random.nextInt(256);
-                int b = random.nextInt(256);
-                int c = random.nextInt(256);
-                byte[] prefixIp = new byte[] {(byte) a, (byte) b, (byte) c, 0};
-                trie.put(prefixIp, 24, new String[] {a + "." + b + "." + c + ".0/24", "AS" + i});
+            try (BufferedReader reader = Files.newBufferedReader(Paths.get(csvPath))) {
+
+                String line;
+                int count = 0;
+                // 跳过标题行
+                reader.readLine();
+
+                while ((line = reader.readLine()) != null) {
+                    line = line.trim();
+                    if (line.isEmpty()) continue;
+
+                    // 解析 CSV: prefix/length,as_path
+                    String[] parts = line.split(",", 2);
+                    if (parts.length < 2) continue;
+
+                    String[] prefixParts = parts[0].split("/");
+                    if (prefixParts.length != 2) continue;
+
+                    String prefix = prefixParts[0];
+                    int prefixLength = Integer.parseInt(prefixParts[1]);
+                    String asPath = parts[1];
+
+                    // 解析 IP 前缀
+                    byte[] prefixBytes = parseIpPrefix(prefix);
+                    if (prefixBytes != null) {
+                        trie.put(prefixBytes, prefixLength, asPath);
+                        count++;
+                    }
+                }
+                entryCount = count;
+
+            } catch (Exception e) {
+                throw new RuntimeException("加载 CSV 数据失败: " + e.getMessage(), e);
             }
 
-            ForwardingPortArray<String[]> fpa = TrieToFPAConverter.convert(trie);
+            // 构建 FPATree
+            ForwardingPortArray<String> fpa = TrieToFPAConverter.convert(trie);
             fpaTree = FPATree.build(fpa);
 
-            for (int i = 0; i < 100000; i++) {
+            // 生成测试 IP（从真实数据中随机选择）
+            Random random = new Random(42);
+            int testSize = 100000;
+            testIps = new byte[testSize][4];
+            testIpsAsInt = new int[testSize];
+
+            for (int i = 0; i < testSize; i++) {
                 testIps[i][0] = (byte) random.nextInt(256);
                 testIps[i][1] = (byte) random.nextInt(256);
                 testIps[i][2] = (byte) random.nextInt(256);
@@ -85,114 +123,34 @@ public class FPATreeBenchmark {
                 testIpsAsInt[i] = ip;
             }
         }
-    }
 
-    // ==================== 构建性能测试 ====================
+        private byte[] parseIpPrefix(String prefix) {
+            String[] octets = prefix.split("\\.");
+            if (octets.length != 4) return null;
 
-    @Benchmark
-    @BenchmarkMode(Mode.AverageTime)
-    @OutputTimeUnit(TimeUnit.MILLISECONDS)
-    public void buildFPATreeLarge() {
-        BitTrie<String[]> trie = new BitTrie<>();
-        Random random = new Random(42);
-        for (int i = 0; i < 10000; i++) {
-            int a = random.nextInt(256);
-            int b = random.nextInt(256);
-            int c = random.nextInt(256);
-            byte[] prefixIp = new byte[] {(byte) a, (byte) b, (byte) c, 0};
-            trie.put(prefixIp, 24, new String[] {a + "." + b + "." + c + ".0/24", "AS" + i});
-        }
-        ForwardingPortArray<String[]> fpa = TrieToFPAConverter.convert(trie);
-        FPATree.build(fpa);
-    }
-
-    // ==================== 查找性能测试 - 字节数组版本 ====================
-
-    @Benchmark
-    public void lookupByteArrayLarge(LargeData data, Blackhole bh) {
-        for (int i = 0; i < data.testIps.length; i++) {
-            bh.consume(data.fpaTree.lookup(data.testIps[i]));
-        }
-    }
-
-    // ==================== 压缩结构性能测试 ====================
-
-    @State(Scope.Benchmark)
-    public static class CompressedData {
-        FPATree<String[]> fpaTree;
-        byte[][] testIps;
-
-        @Setup(Level.Trial)
-        public void setup() {
-            BitTrie<String[]> trie = new BitTrie<>();
-            testIps = new byte[1000][4];
-
-            Random random = new Random(42);
-            // 创建密集的Layer 2/3结构
-            for (int a = 0; a < 16; a++) {
-                for (int b = 0; b < 16; b++) {
-                    byte[] prefixIp = new byte[] {(byte) (10 + a), (byte) b, 0, 0};
-                    trie.put(
-                            prefixIp,
-                            24,
-                            new String[] {(10 + a) + "." + b + ".0.0/24", "AS" + (a * 16 + b)});
+            byte[] result = new byte[4];
+            try {
+                for (int i = 0; i < 4; i++) {
+                    result[i] = (byte) Integer.parseInt(octets[i]);
                 }
-            }
-
-            ForwardingPortArray<String[]> fpa = TrieToFPAConverter.convert(trie);
-            fpaTree = FPATree.build(fpa);
-
-            // 生成测试IP（在相同范围内）
-            for (int i = 0; i < 1000; i++) {
-                testIps[i][0] = (byte) (10 + random.nextInt(16));
-                testIps[i][1] = (byte) random.nextInt(16);
-                testIps[i][2] = (byte) random.nextInt(256);
-                testIps[i][3] = (byte) random.nextInt(256);
+                return result;
+            } catch (NumberFormatException e) {
+                return null;
             }
         }
     }
 
     @Benchmark
-    public void lookupCompressedStructure(CompressedData data, Blackhole bh) {
+    public void lookupByteArrayRealData(RealASData data, Blackhole bh) {
         for (int i = 0; i < data.testIps.length; i++) {
             bh.consume(data.fpaTree.lookup(data.testIps[i]));
-        }
-    }
-
-    // ==================== 稀疏结构性能测试 ====================
-
-    @State(Scope.Benchmark)
-    public static class SparseData {
-        FPATree<String[]> fpaTree;
-        byte[][] testIps;
-
-        @Setup(Level.Trial)
-        public void setup() {
-            BitTrie<String[]> trie = new BitTrie<>();
-            testIps = new byte[1000][4];
-
-            // 创建稀疏结构
-            trie.put(new byte[] {(byte) 10, 0, 0, 0}, 16, new String[] {"10.0.0.0/16", "default"});
-            trie.put(new byte[] {(byte) 10, 0, 1, 0}, 24, new String[] {"10.0.1.0/24", "specific"});
-            trie.put(new byte[] {(byte) 10, 0, 2, 0}, 24, new String[] {"10.0.2.0/24", "specific"});
-
-            ForwardingPortArray<String[]> fpa = TrieToFPAConverter.convert(trie);
-            fpaTree = FPATree.build(fpa);
-
-            Random random = new Random(42);
-            for (int i = 0; i < 1000; i++) {
-                testIps[i][0] = (byte) 10;
-                testIps[i][1] = 0;
-                testIps[i][2] = (byte) random.nextInt(256);
-                testIps[i][3] = (byte) random.nextInt(256);
-            }
         }
     }
 
     @Benchmark
-    public void lookupSparseStructure(SparseData data, Blackhole bh) {
-        for (int i = 0; i < data.testIps.length; i++) {
-            bh.consume(data.fpaTree.lookup(data.testIps[i]));
+    public void lookupIntRealData(RealASData data, Blackhole bh) {
+        for (int i = 0; i < data.testIpsAsInt.length; i++) {
+            bh.consume(data.fpaTree.lookup(data.testIpsAsInt[i]));
         }
     }
 }

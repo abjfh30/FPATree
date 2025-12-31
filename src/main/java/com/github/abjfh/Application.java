@@ -26,9 +26,14 @@ public class Application {
         System.out.println("compressedChunkList大小: " + tree.compressedChunkList.size());
         System.out.println("sparseChunkList大小: " + tree.sparseChunkList.size());
         System.out.println("resultList大小: " + tree.resultList.size());
-
         // 验证查找功能
         validateLookup(bitTrie, tree, testIps);
+        while (true) {
+            for (byte[] ip : testIps) {
+                String[] treeResult = tree.lookup(ip);
+                System.out.println();
+            }
+        }
     }
 
     private static void validateLookup(

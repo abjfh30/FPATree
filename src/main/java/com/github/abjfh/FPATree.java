@@ -2,7 +2,9 @@ package com.github.abjfh;
 
 import java.util.ArrayList;
 import java.util.Hashtable;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 
 public class FPATree<V> {
     // ==================== 常量定义 ====================
@@ -142,31 +144,46 @@ public class FPATree<V> {
         return lookupEntry & INDEX_MASK;
     }
 
-    /** 根据节点构建 lookupEntry */
+    /** 根据节点构建 lookupEntry（带缓存优化） */
     private int buildLookupEntry(
-            ForwardingPortArray.FPANode<V> node, Hashtable<V, Integer> idxTable, int K) {
+            ForwardingPortArray.FPANode<V> node,
+            Hashtable<V, Integer> idxTable,
+            int K,
+            Map<ForwardingPortArray.FPANode<V>, Integer> nodeCache) {
+        // 检查缓存
+        Integer cached = nodeCache.get(node);
+        if (cached != null) {
+            return cached;
+        }
+
+        int result;
         if (node.next == null) {
-            return encodeLookupEntry(TYPE_LEAF, getValueIndex(node.value, idxTable));
+            result = encodeLookupEntry(TYPE_LEAF, getValueIndex(node.value, idxTable));
         } else {
             boolean sparse = isSparse(node.next, K);
             if (sparse) {
-                int sparseIdx = processSparseBranch(node.next, idxTable, K);
-                return encodeLookupEntry(TYPE_SPARSE, sparseIdx);
+                int sparseIdx = processSparseBranch(node.next, idxTable, K, nodeCache);
+                result = encodeLookupEntry(TYPE_SPARSE, sparseIdx);
             } else {
                 // Layer 2/3使用压缩结构
                 CompressedGroup[] newChunk = allocateCompressedChunk();
-                buildCompressedGroups(node.next, newChunk, idxTable, K);
-                return encodeLookupEntry(TYPE_COMPRESSED, compressedChunkList.size() - 1);
+                buildCompressedGroups(node.next, newChunk, idxTable, K, nodeCache);
+                result = encodeLookupEntry(TYPE_COMPRESSED, compressedChunkList.size() - 1);
             }
         }
+
+        // 存入缓存
+        nodeCache.put(node, result);
+        return result;
     }
 
-    /** 构建压缩组结构 */
+    /** 构建压缩组结构（带缓存优化） */
     private void buildCompressedGroups(
             ForwardingPortArray<V> fpa,
             CompressedGroup[] groups,
             Hashtable<V, Integer> idxTable,
-            int K) {
+            int K,
+            Map<ForwardingPortArray.FPANode<V>, Integer> nodeCache) {
 
         int tableSize = COMPRESSED_TABLE_SIZE;
 
@@ -187,7 +204,7 @@ public class FPATree<V> {
                     defaultValues[groupIdx] =
                             encodeLookupEntry(TYPE_LEAF, getValueIndex(node.value, idxTable));
                 } else {
-                    defaultValues[groupIdx] = buildLookupEntry(node, idxTable, K);
+                    defaultValues[groupIdx] = buildLookupEntry(node, idxTable, K, nodeCache);
                 }
             }
         }
@@ -198,7 +215,7 @@ public class FPATree<V> {
             int clusterIdx = (idx >> CLUSTER_BITS) & 0x7;
 
             ForwardingPortArray.FPANode<V> node = fpa.table.get(idx);
-            int lookupEntry = buildLookupEntry(node, idxTable, K);
+            int lookupEntry = buildLookupEntry(node, idxTable, K, nodeCache);
 
             if (lookupEntry != defaultValues[groupIdx]) {
                 nonDefaultCount[groupIdx][clusterIdx]++;
@@ -230,7 +247,7 @@ public class FPATree<V> {
                 int bitIdx = idx & 0x7;
 
                 ForwardingPortArray.FPANode<V> node = fpa.table.get(idx);
-                int lookupEntry = buildLookupEntry(node, idxTable, K);
+                int lookupEntry = buildLookupEntry(node, idxTable, K, nodeCache);
 
                 if (lookupEntry != defaultValues[groupIdx]) {
                     // 设置 bitset
@@ -266,7 +283,8 @@ public class FPATree<V> {
             ForwardingPortArray<V> fpa,
             int[][] targetChunk,
             Hashtable<V, Integer> idxTable,
-            int K) {
+            int K,
+            Map<ForwardingPortArray.FPANode<V>, Integer> nodeCache) {
         int tableSize = fpa.table.size();
 
         for (int idx = 0; idx < tableSize; idx++) {
@@ -283,18 +301,22 @@ public class FPATree<V> {
                 // 非叶子节点：判断稀疏性
                 boolean sparse = isSparse(node.next, K);
                 if (sparse) {
-                    int sparseIdx = processSparseBranch(node.next, idxTable, K);
+                    int sparseIdx = processSparseBranch(node.next, idxTable, K, nodeCache);
                     targetChunk[groupIdx][bitIdx] = encodeLookupEntry(TYPE_SPARSE, sparseIdx);
                 } else {
-                    processDenseBranch(node.next, targetChunk, groupIdx, bitIdx, idxTable, K);
+                    processDenseBranch(
+                            node.next, targetChunk, groupIdx, bitIdx, idxTable, K, nodeCache);
                 }
             }
         }
     }
 
-    /** 处理稀疏分支，返回sparse索引 */
+    /** 处理稀疏分支，返回sparse索引（带缓存优化） */
     private int processSparseBranch(
-            ForwardingPortArray<V> nextFPA, Hashtable<V, Integer> idxTable, int K) {
+            ForwardingPortArray<V> nextFPA,
+            Hashtable<V, Integer> idxTable,
+            int K,
+            Map<ForwardingPortArray.FPANode<V>, Integer> nodeCache) {
         // 收集稀疏条目（所有与根节点不同的节点）
         ForwardingPortArray.FPANode<V> root = nextFPA.table.get(0);
         List<SparseEntry> sparseEntriesList = new ArrayList<>();
@@ -303,7 +325,7 @@ public class FPATree<V> {
         SparseEntry defaultEntry = new SparseEntry();
         defaultEntry.prefix = -1;
         defaultEntry.mask = -1; // -1确保排序后在最后
-        defaultEntry.lookupEntry = buildLookupEntry(root, idxTable, K);
+        defaultEntry.lookupEntry = buildLookupEntry(root, idxTable, K, nodeCache);
         sparseEntriesList.add(defaultEntry);
 
         // 添加非根节点的稀疏条目
@@ -313,7 +335,7 @@ public class FPATree<V> {
                 SparseEntry entry = new SparseEntry();
                 entry.prefix = (byte) idx;
                 entry.mask = (byte) (32 - Integer.numberOfLeadingZeros(nextFPA.table.size() - 1));
-                entry.lookupEntry = buildLookupEntry(node, idxTable, K);
+                entry.lookupEntry = buildLookupEntry(node, idxTable, K, nodeCache);
                 sparseEntriesList.add(entry);
             }
         }
@@ -328,21 +350,22 @@ public class FPATree<V> {
         return sparseIdx;
     }
 
-    /** 处理非稀疏分支 */
+    /** 处理非稀疏分支（带缓存优化） */
     private void processDenseBranch(
             ForwardingPortArray<V> nextFPA,
             int[][] parentChunk,
             int parentChunkIdx,
             int parentInChunkIdx,
             Hashtable<V, Integer> idxTable,
-            int K) {
+            int K,
+            Map<ForwardingPortArray.FPANode<V>, Integer> nodeCache) {
         // Layer 2/3 使用压缩结构
         {
             CompressedGroup[] newCompressedChunk = allocateCompressedChunk();
             int newChunkIdx = compressedChunkList.size() - 1;
 
-            // 递归处理下一层
-            buildCompressedGroups(nextFPA, newCompressedChunk, idxTable, K);
+            // 递归处理下一层（使用缓存避免重复计算）
+            buildCompressedGroups(nextFPA, newCompressedChunk, idxTable, K, nodeCache);
 
             // 在父chunk中设置指向压缩chunk的指针
             parentChunk[parentChunkIdx][parentInChunkIdx] =
@@ -371,9 +394,12 @@ public class FPATree<V> {
         FPATree<V> fpaTree = new FPATree<>();
 
         Hashtable<V, Integer> idxTable = new Hashtable<>();
+        // 节点缓存：避免重复处理相同的子树
+        IdentityHashMap<ForwardingPortArray.FPANode<V>, Integer> nodeCache =
+                new IdentityHashMap<>();
 
         // 处理Layer 1（深度LAYER1_DEPTH，65536条目）
-        fpaTree.processLevel(root, fpaTree.rootChunk, idxTable, K);
+        fpaTree.processLevel(root, fpaTree.rootChunk, idxTable, K, nodeCache);
 
         assert fpaTree.resultList.size() < (1 << INDEX_BITS);
         return fpaTree;
@@ -412,7 +438,7 @@ public class FPATree<V> {
         for (int i = 0; i < entries.length - 1; i++) {
             SparseEntry entry = entries[i];
             int prefix = entry.prefix & 0xFF;
-            int mask = entry.mask; // byte会自动符号扩展为int
+            int mask = entry.mask; // byte会自动符号扩展为 int
 
             // 获取对应位的值
             int bits = (ipAddress >> (32 - bitOffset - mask)) & ((1 << mask) - 1);
@@ -448,10 +474,15 @@ public class FPATree<V> {
         int bitset = CompressedGroup.getBitset(codeWord);
         int before = CompressedGroup.getBefore(codeWord);
 
+        // 优化：整个 cluster 都是默认值
+        if (bitset == 0) {
+            return followLookupEntry(group.defaultValue, ipAddress, bitOffset + LAYER23_DEPTH);
+        }
+
         // 检查该位是否为非默认值
         int mask = 1 << (7 - bitIdx);
         if ((bitset & mask) == 0) {
-            // 位为0，使用默认值
+            // 位为0，使用默认值（内联 LEAF 处理以减少方法调用）
             return followLookupEntry(group.defaultValue, ipAddress, bitOffset + LAYER23_DEPTH);
         }
 
@@ -468,14 +499,18 @@ public class FPATree<V> {
 
     /** 跟随lookupEntry进行查找 */
     private V followLookupEntry(int lookupEntry, int ipAddress, int bitOffset) {
+        if (lookupEntry == 0) {
+            return null;
+        }
         int type = getType(lookupEntry);
         int index = getIndex(lookupEntry);
+        if (type == TYPE_LEAF) {
+            return resultList.get(index);
+        }
 
         switch (type) {
-            case TYPE_LEAF:
-                return resultList.get(index);
             case TYPE_COMPRESSED:
-                // 计算在压缩chunk中的索引
+                // 计算在压缩 chunk中的索引
                 int idx = (ipAddress >> (32 - bitOffset - LAYER23_DEPTH)) & 0xFF;
                 return lookupInCompressedGroup(
                         compressedChunkList.get(index), ipAddress, bitOffset, idx);
