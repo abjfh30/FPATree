@@ -97,6 +97,11 @@ public class BitTrie<V> {
         TrieNode<V> node = root;
         V lastFoundValue = null;
 
+        // 检查root节点是否是叶子节点（处理/0前缀）
+        if (node.isLeaf) {
+            lastFoundValue = node.value;
+        }
+
         // 遍历键的每一位（最多32位，即4个字节）
         for (int i = 0; i < Math.min(key.length * 8, 32); i++) {
             int byteIndex = i / 8;

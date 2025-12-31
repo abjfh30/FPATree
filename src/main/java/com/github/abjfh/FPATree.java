@@ -9,8 +9,8 @@ public class FPATree<V> {
 
     // Lookup Entry 类型常量
     private static final int TYPE_LEAF = 0; // 叶子节点，指向resultList
+    private static final int TYPE_COMPRESSED = 1; // 压缩分支，指向compressedChunkList
     private static final int TYPE_SPARSE = 2; // 稀疏分支，指向sparseChunkList
-    private static final int TYPE_COMPRESSED = 3; // 压缩分支，指向compressedChunkList
 
     // 位数相关常量
     private static final int INDEX_BITS = 30; // index占30位
@@ -299,25 +299,11 @@ public class FPATree<V> {
         ForwardingPortArray.FPANode<V> root = nextFPA.table.get(0);
         List<SparseEntry> sparseEntriesList = new ArrayList<>();
 
-        // 添加根节点作为默认值（使用特殊的prefix=-1表示）
+        // 添加根节点作为默认值（mask=-1保证排序时在最后）
         SparseEntry defaultEntry = new SparseEntry();
         defaultEntry.prefix = -1;
-        defaultEntry.mask = 0;
-
-        if (root.next == null) {
-            defaultEntry.lookupEntry =
-                    encodeLookupEntry(TYPE_LEAF, getValueIndex(root.value, idxTable));
-        } else {
-            if (isSparse(root.next, K)) {
-                int childSparseIdx = processSparseBranch(root.next, idxTable, K);
-                defaultEntry.lookupEntry = encodeLookupEntry(TYPE_SPARSE, childSparseIdx);
-            } else {
-                CompressedGroup[] newCompressedChunk = allocateCompressedChunk();
-                buildCompressedGroups(root.next, newCompressedChunk, idxTable, K);
-                defaultEntry.lookupEntry =
-                        encodeLookupEntry(TYPE_COMPRESSED, compressedChunkList.size() - 1);
-            }
-        }
+        defaultEntry.mask = -1; // -1确保排序后在最后
+        defaultEntry.lookupEntry = buildLookupEntry(root, idxTable, K);
         sparseEntriesList.add(defaultEntry);
 
         // 添加非根节点的稀疏条目
@@ -327,29 +313,13 @@ public class FPATree<V> {
                 SparseEntry entry = new SparseEntry();
                 entry.prefix = (byte) idx;
                 entry.mask = (byte) (32 - Integer.numberOfLeadingZeros(nextFPA.table.size() - 1));
-
-                if (node.next == null) {
-                    entry.lookupEntry =
-                            encodeLookupEntry(TYPE_LEAF, getValueIndex(node.value, idxTable));
-                } else {
-                    if (isSparse(node.next, K)) {
-                        int childSparseIdx = processSparseBranch(node.next, idxTable, K);
-                        entry.lookupEntry = encodeLookupEntry(TYPE_SPARSE, childSparseIdx);
-                    } else {
-                        CompressedGroup[] newCompressedChunk = allocateCompressedChunk();
-                        buildCompressedGroups(node.next, newCompressedChunk, idxTable, K);
-                        entry.lookupEntry =
-                                encodeLookupEntry(TYPE_COMPRESSED, compressedChunkList.size() - 1);
-                    }
-                }
+                entry.lookupEntry = buildLookupEntry(node, idxTable, K);
                 sparseEntriesList.add(entry);
             }
         }
 
-        // 按mask降序排序（默认条目除外，保持在索引0）
-        List<SparseEntry> nonDefaultEntries =
-                sparseEntriesList.subList(1, sparseEntriesList.size());
-        nonDefaultEntries.sort((a, b) -> Integer.compare(b.mask & 0xFF, a.mask & 0xFF));
+        // 按mask降序排序（默认值mask=-1自动排在最后）
+        sparseEntriesList.sort((a, b) -> Byte.compare(b.mask, a.mask));
 
         SparseEntry[] sparseEntries = sparseEntriesList.toArray(new SparseEntry[0]);
         int sparseIdx = sparseChunkList.size();
@@ -393,8 +363,8 @@ public class FPATree<V> {
      *
      * <ul>
      *   <li>TYPE_LEAF(0): 叶子节点，指向resultList
+     *   <li>TYPE_COMPRESSED(1): 压缩分支，指向compressedChunkList
      *   <li>TYPE_SPARSE(2): 稀疏分支，指向sparseChunkList
-     *   <li>TYPE_COMPRESSED(3): 压缩分支，指向compressedChunkList
      * </ul>
      */
     public static <V> FPATree<V> build(ForwardingPortArray<V> root, int K) {
@@ -428,6 +398,8 @@ public class FPATree<V> {
     /**
      * 在稀疏chunk中查找
      *
+     * <p>条目按mask降序排序（最长前缀优先），最后一个条目为默认值（mask=-1）
+     *
      * @param sparseIdx sparse索引
      * @param ipAddress IP地址（32位整数）
      * @param bitOffset 当前位偏移
@@ -436,25 +408,22 @@ public class FPATree<V> {
     private V lookupInSparse(int sparseIdx, int ipAddress, int bitOffset) {
         SparseEntry[] entries = sparseChunkList.get(sparseIdx);
 
-        // 第一个条目是默认值（根节点）
-        SparseEntry defaultEntry = entries[0];
-
-        // 从第二个条目开始查找匹配
-        for (int i = 1; i < entries.length; i++) {
+        // 按mask降序遍历，找到匹配就返回（最长前缀匹配）
+        for (int i = 0; i < entries.length - 1; i++) {
             SparseEntry entry = entries[i];
             int prefix = entry.prefix & 0xFF;
-            int mask = entry.mask & 0xFF;
+            int mask = entry.mask; // byte会自动符号扩展为int
 
             // 获取对应位的值
             int bits = (ipAddress >> (32 - bitOffset - mask)) & ((1 << mask) - 1);
 
             if (bits == prefix) {
-                // 找到匹配，使用该entry
                 return followLookupEntry(entry.lookupEntry, ipAddress, bitOffset + mask);
             }
         }
 
-        // 没有匹配任何条目，使用默认值
+        // 没有匹配任何条目，使用最后一个（默认值）
+        SparseEntry defaultEntry = entries[entries.length - 1];
         return followLookupEntry(defaultEntry.lookupEntry, ipAddress, bitOffset);
     }
 
@@ -505,13 +474,13 @@ public class FPATree<V> {
         switch (type) {
             case TYPE_LEAF:
                 return resultList.get(index);
-            case TYPE_SPARSE:
-                return lookupInSparse(index, ipAddress, bitOffset);
             case TYPE_COMPRESSED:
                 // 计算在压缩chunk中的索引
                 int idx = (ipAddress >> (32 - bitOffset - LAYER23_DEPTH)) & 0xFF;
                 return lookupInCompressedGroup(
                         compressedChunkList.get(index), ipAddress, bitOffset, idx);
+            case TYPE_SPARSE:
+                return lookupInSparse(index, ipAddress, bitOffset);
             default:
                 return null;
         }
