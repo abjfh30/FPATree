@@ -40,3 +40,4 @@ build/
 /data/
 /.idea/
 /.claude/
+/jmh-result.json
