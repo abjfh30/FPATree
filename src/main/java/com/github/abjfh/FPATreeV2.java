@@ -1,5 +1,12 @@
 package com.github.abjfh;
 
+import inet.ipaddr.AddressStringException;
+import inet.ipaddr.IPAddress;
+import inet.ipaddr.IPAddressString;
+
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.io.IOException;
 import java.util.*;
 
 public class FPATreeV2<V> {
@@ -9,6 +16,11 @@ public class FPATreeV2<V> {
     private static final int LAYER1_GROUP_COUNT = 1024; // Layer 1 组数
     private static final int LAYER23_GROUP_COUNT = 4; // Layer 2/3 组数
     private static final int GROUP_SIZE = 64; // 每组元素数量
+
+    // lookupEntry 类型常量
+    private static final int TYPE_LEAF = 0; // 00: 值索引 (指向 resultList)
+    private static final int TYPE_DENSE = 1; // 01: 非稀疏 chunk 索引 (指向 chunkList)
+    // TYPE_SPARSE 暂不实现
 
     int K = 3;
     int[][] rootChunk = new int[LAYER1_GROUP_COUNT][GROUP_SIZE];
@@ -29,100 +41,285 @@ public class FPATreeV2<V> {
         int[] lookupEntries;
     }
 
+    /**
+     * 编码 lookupEntry
+     *
+     * @param type 类型 (TYPE_LEAF, TYPE_DENSE)
+     * @param index 索引值
+     * @return 编码后的 32 位整数
+     */
+    private static int encodeLookupEntry(int type, int index) {
+        return (type << 30) | (index & 0x3FFFFFFF);
+    }
+
+    /**
+     * 获取值的索引（去重）
+     *
+     * @param value 要存储的值
+     * @param idxTable 值到索引的映射表
+     * @param tree FPATreeV2 实例
+     * @return 值在 resultList 中的索引
+     */
+    private static <V> int getValueIndex(
+            V value, Hashtable<V, Integer> idxTable, FPATreeV2<V> tree) {
+        if (value == null) {
+            return 0; // null 值索引为 0
+        }
+        return idxTable.compute(
+                value,
+                (v, existingIdx) -> {
+                    if (existingIdx == null) {
+                        tree.resultList.add(v);
+                        return tree.resultList.size() - 1;
+                    }
+                    return existingIdx;
+                });
+    }
+
+    /**
+     * 处理通用层 (8位)，构建 ChunkEntry[4]
+     *
+     * @param fpa 当前层的 ForwardingPortArray (大小256)
+     * @param idxTable 值索引表
+     * @param tree FPATreeV2 实例
+     * @return chunkList 中的索引
+     */
+    private static <V> int processLayer(
+            ForwardingPortArray<V> fpa, Hashtable<V, Integer> idxTable, FPATreeV2<V> tree) {
+        ChunkEntry[] group = new ChunkEntry[4];
+
+        for (int j = 0; j < 4; j++) {
+            short[] codeWords = new short[8];
+            List<Integer> lookupEntries = new LinkedList<>();
+
+            ForwardingPortArray.FPANode<V> firstNode = fpa.table.get(j * 64);
+            int count = 0;
+
+            for (int k = 0; k < 64; k++) {
+                int idx = j * 64 + k;
+                int cluster = (idx >> 3) & 0b111;
+                int bit = idx & 0b111;
+
+                ForwardingPortArray.FPANode<V> nextNode = fpa.table.get(idx);
+
+                if (!Objects.equals(firstNode, nextNode)) {
+                    // 设置 bitset
+                    codeWords[cluster] |= (short) (1 << 8 << (8 - bit - 1));
+
+                    // 处理节点
+                    int lookupEntry;
+                    if (nextNode.next == null) {
+                        // 最后一层或叶子节点：存储值索引
+                        int valueIdx = getValueIndex(nextNode.value, idxTable, tree);
+                        lookupEntry = encodeLookupEntry(TYPE_LEAF, valueIdx);
+                    } else {
+                        // 有子树：递归处理下一层
+                        int chunkIdx = processLayer(nextNode.next, idxTable, tree);
+                        lookupEntry = encodeLookupEntry(TYPE_DENSE, chunkIdx);
+                    }
+
+                    lookupEntries.add(lookupEntry);
+                    count++;
+                    firstNode = nextNode;
+                }
+
+                // 每 8 个元素设置 before 值
+                if (k > 0 && k % 8 == 0) {
+                    codeWords[cluster] |= (short) count;
+                }
+            }
+
+            ChunkEntry entry = new ChunkEntry();
+            entry.codeWord = codeWords;
+            entry.lookupEntries = lookupEntries.stream().mapToInt(Integer::intValue).toArray();
+            group[j] = entry;
+        }
+
+        // 将 group 加入 chunkList
+        int chunkIdx = tree.chunkList.size();
+        tree.chunkList.add(group);
+        return chunkIdx;
+    }
+
     public static <V> FPATreeV2<V> build(ForwardingPortArray<V> fpa) {
 
         Hashtable<V, Integer> idxTable = new Hashtable<>();
         FPATreeV2<V> tree = new FPATreeV2<>();
-        int size = fpa.table.size();
+        int size = fpa.table.size(); // Layer 1 大小: 2^16 = 65536
+
         for (int i = 0; i < size; i++) {
-            // 此时i代表L1的16位int值
-            // i前六位为 group1,后六位为 bit1
+            // i 代表 Layer 1 的 16 位索引
+            // 高 6 位: group1 (0-1023)
+            // 低 6 位: bit1 (0-63)
             int group1 = i >> 6;
             int bit1 = i & 0b111111;
 
             ForwardingPortArray.FPANode<V> node = fpa.table.get(i);
-            // 如果有next 节点:
-            if (node.next != null) {
-                // lookupEntry 应该跳入L2
-                // 这里先构建一个chunk节点
-                ForwardingPortArray<V> fpa_l2 = node.next;
-                ChunkEntry[] group2 = new ChunkEntry[4];
-                for (int j = 0; j < 4; j++) {
-                    short[] codeWords = new short[8];
-                    List<Integer> lookupEntries = new LinkedList<>();
-                    ForwardingPortArray.FPANode<V> firstNodeL2 = null;
-                    for (int k = 0; k < 64; k++) {
-                        int idx = j * 64 + k;
-                        ForwardingPortArray.FPANode<V> nextNodeL2 = fpa_l2.table.get(idx);
-                        if (!Objects.equals(firstNodeL2, nextNodeL2)) {
-                            int cluster2 = (idx >> 3) & 0b111;
-                            int bit2 = idx & 0b111;
-                            codeWords[cluster2] ^= (short) (bit2 << 8);
-                            // 同样的 判断是否跳入L3
-                            if (nextNodeL2.next != null) {
-                                ForwardingPortArray<V> fpa_l3 = nextNodeL2.next;
-                                ChunkEntry[] group3 = new ChunkEntry[4];
-                                // 填充对应的4个组
-                                for (int j3 = 0; j3 < 4; j3++) {
-                                    short[] codeWordsL3 = new short[8];
-                                    List<Integer> lookupEntriesL3 = new LinkedList<>();
-                                    ForwardingPortArray.FPANode<V> firstNodeL3 = null;
-                                    int countL3 = 0;
-                                    // 压缩每个组中的64个元素为位图
-                                    for (int k3 = 0; k3 < 64; k3++) {
-                                        int idxL3 = j3 * 64 + k3;
-                                        int cluster3 = (idxL3 >> 3) & 0b111;
-                                        int bit3 = idxL3 & 0b111;
-                                        ForwardingPortArray.FPANode<V> nextNodeL3 =
-                                                fpa_l3.table.get(idxL3);
-                                        if (!Objects.equals(firstNodeL3, nextNodeL3)) {
-                                            // 从左往右数, 将第 bit3 位置的bit值置为1
-                                            codeWordsL3[cluster3] |=
-                                                    (short) (1 << 8 << (8 - bit3 - 1));
 
-                                            lookupEntriesL3.add(
-                                                    nextNodeL3.value == null
-                                                            ? 0
-                                                            : idxTable.compute(
-                                                                    nextNodeL3.value,
-                                                                    (v_, idx_) -> {
-                                                                        if (idx_ == null) {
-                                                                            tree.resultList.add(v_);
-                                                                            return tree.resultList
-                                                                                            .size()
-                                                                                    - 1;
-                                                                        } else {
-                                                                            return idx_;
-                                                                        }
-                                                                    }));
+            if (node.next == null) {
+                // [情况1] 叶子节点：直接存储值索引
+                int valueIdx = getValueIndex(node.value, idxTable, tree);
+                tree.rootChunk[group1][bit1] = encodeLookupEntry(TYPE_LEAF, valueIdx);
+            } else {
+                // [情况2] 有子树：构建 Layer 2 chunk (非最后一层)
+                int chunkIdx = processLayer(node.next, idxTable, tree);
+                tree.rootChunk[group1][bit1] = encodeLookupEntry(TYPE_DENSE, chunkIdx);
+            }
+        }
 
-                                            countL3++;
-                                            firstNodeL3 = nextNodeL3;
-                                        }
-                                        if (k3 > 0 && k3 % 8 == 0) {
-                                            // 将 before 设置为本组中所有前面的簇中的 1 的个数
-                                            codeWordsL3[cluster3] |= (short) (countL3);
-                                        }
-                                    }
-                                    ChunkEntry chunkEntryL3 = new ChunkEntry();
-                                    // TODO 实现稀疏节点的优化
-                                    chunkEntryL3.codeWord = codeWordsL3;
-                                    chunkEntryL3.lookupEntries = new int[lookupEntriesL3.size()];
-                                    for (int tmpI = 0; tmpI < lookupEntriesL3.size(); tmpI++) {
-                                        chunkEntryL3.lookupEntries[tmpI] =
-                                                lookupEntriesL3.get(tmpI);
-                                    }
-                                    group3[j3] = chunkEntryL3;
-                                }
-                            }
+        return tree;
+    }
 
-                            firstNodeL2 = nextNodeL2;
-                        }
+    /**
+     * 主函数：使用 aspat.csv 数据测试 FPATreeV2 构建
+     */
+    public static void main(String[] args) {
+        String csvFile = "data/aspat.csv";
+        int lineCount = 0;
+        int maxLines = 10000; // 限制读取行数用于测试
+
+        System.out.println("开始测试 FPATreeV2 构建...");
+        System.out.println("数据文件: " + csvFile);
+        System.out.println("最大行数: " + maxLines);
+        System.out.println();
+
+        // 1. 构建 BitTrie
+        BitTrie<String> trie = new BitTrie<>();
+
+        try (BufferedReader br = new BufferedReader(new FileReader(csvFile))) {
+            String line;
+            while ((line = br.readLine()) != null && lineCount < maxLines) {
+                lineCount++;
+                if (lineCount % 1000 == 0) {
+                    System.out.println("已处理 " + lineCount + " 行...");
+                }
+
+                // 解析 CSV: 前缀/长度,AS路径
+                String[] parts = line.split(",", 2);
+                if (parts.length < 2) continue;
+
+                // 解析 IP 前缀
+                IPAddress prefix;
+                try {
+                    prefix = new IPAddressString(parts[0].trim()).toAddress();
+                } catch (AddressStringException e) {
+                    continue; // 跳过无效的 IP 地址
+                }
+                // 获取字节数组：IPv4 为 4 字节
+                byte[] bytes;
+                if (prefix.isIPv4()) {
+                    bytes = prefix.toIPv4().getBytes();
+                } else {
+                    bytes = prefix.toIPv6().getBytes();
+                }
+                int prefixLength = prefix.getNetworkPrefixLength();
+
+                // AS 路径作为值
+                String asPath = parts[1].trim();
+
+                // 插入 Trie
+                trie.put(bytes, prefixLength, asPath);
+            }
+        } catch (IOException e) {
+            System.err.println("读取文件失败: " + e.getMessage());
+            return;
+        }
+
+        System.out.println();
+        System.out.println("=== BitTrie 构建完成 ===");
+        System.out.println("总前缀数: " + lineCount);
+
+        // 2. 转换为 ForwardingPortArray
+        long startTime = System.currentTimeMillis();
+        ForwardingPortArray<String> fpa = TrieToFPAConverter.convert(trie);
+        long convertTime = System.currentTimeMillis() - startTime;
+
+        System.out.println("ForwardingPortArray 转换耗时: " + convertTime + " ms");
+
+        // 3. 构建 FPATreeV2
+        startTime = System.currentTimeMillis();
+        FPATreeV2<String> tree = FPATreeV2.build(fpa);
+        long buildTime = System.currentTimeMillis() - startTime;
+
+        System.out.println();
+        System.out.println("=== FPATreeV2 构建完成 ===");
+        System.out.println("构建耗时: " + buildTime + " ms");
+
+        // 4. 输出统计信息
+        System.out.println();
+        System.out.println("=== 统计信息 ===");
+
+        // 统计 rootChunk 类型分布
+        int leafCount = 0;
+        int denseCount = 0;
+        int nullCount = 0;
+
+        for (int i = 0; i < tree.rootChunk.length; i++) {
+            for (int j = 0; j < tree.rootChunk[i].length; j++) {
+                int entry = tree.rootChunk[i][j];
+                if (entry == 0) {
+                    nullCount++;
+                } else {
+                    int type = entry >>> 30;
+                    if (type == TYPE_LEAF) {
+                        leafCount++;
+                    } else if (type == TYPE_DENSE) {
+                        denseCount++;
                     }
                 }
             }
         }
 
-        return tree;
+        System.out.println("Layer 1 (rootChunk):");
+        System.out.println("  - LEAF 类型: " + leafCount);
+        System.out.println("  - DENSE 类型: " + denseCount);
+        System.out.println("  - 空值 (0): " + nullCount);
+        System.out.println("  - 总条目: " + (tree.rootChunk.length * tree.rootChunk[0].length));
+
+        System.out.println();
+        System.out.println("Layer 2/3 (chunkList):");
+        System.out.println("  - Chunk 数量: " + tree.chunkList.size());
+
+        int totalLookupEntries = 0;
+        for (ChunkEntry[] group : tree.chunkList) {
+            for (ChunkEntry entry : group) {
+                if (entry.lookupEntries != null) {
+                    totalLookupEntries += entry.lookupEntries.length;
+                }
+            }
+        }
+        System.out.println("  - 总 lookupEntry 数: " + totalLookupEntries);
+
+        System.out.println();
+        System.out.println("resultList (去重值):");
+        System.out.println("  - 唯一值数量: " + tree.resultList.size());
+
+        // 5. 简单查询测试
+        System.out.println();
+        System.out.println("=== 查询测试 ===");
+
+        // 测试几个已知的前缀
+        String[] testPrefixes = {
+            "1.0.0.0/24", "8.8.8.0/24", "192.168.0.0/16", "10.0.0.0/8"
+        };
+
+        for (String prefixStr : testPrefixes) {
+            try {
+                IPAddress prefix = new IPAddressString(prefixStr).toAddress();
+                byte[] bytes;
+                if (prefix.isIPv4()) {
+                    bytes = prefix.toIPv4().getBytes();
+                } else {
+                    bytes = prefix.toIPv6().getBytes();
+                }
+                String result = trie.get(bytes);
+                System.out.println(prefixStr + " -> " + (result != null ? result : "未找到"));
+            } catch (AddressStringException e) {
+                System.out.println(prefixStr + " -> 无效地址");
+            }
+        }
+
+        System.out.println();
+        System.out.println("=== 测试完成 ===");
     }
 }
