@@ -31,7 +31,7 @@ public class FPATreeV2<V> {
     static class ChunkEntry {
         short[] codeWord;
         int[] lookupEntries;
-        int defaultValue;  // 整个 group 共享的默认值
+        int defaultValue; // 整个 group 共享的默认值
     }
 
     /**
@@ -89,13 +89,15 @@ public class FPATreeV2<V> {
             ForwardingPortArray.FPANode<V> firstNode = fpa.table.get(j * 64);
             int defaultValue;
             if (firstNode.next == null) {
-                defaultValue = encodeLookupEntry(TYPE_LEAF, getValueIndex(firstNode.value, idxTable, tree));
+                defaultValue =
+                        encodeLookupEntry(
+                                TYPE_LEAF, getValueIndex(firstNode.value, idxTable, tree));
             } else {
                 int chunkIdx = processLayer(firstNode.next, idxTable, tree);
                 defaultValue = encodeLookupEntry(TYPE_DENSE, chunkIdx);
             }
 
-            int cumulativeOnes = 0;  // 累积的 cluster 中 bitset 1 的个数
+            int cumulativeOnes = 0; // 累积的 cluster 中 bitset 1 的个数
 
             for (int cluster = 0; cluster < 8; cluster++) {
                 // 收集 cluster 的非默认值，确定 bitset
@@ -110,7 +112,9 @@ public class FPATreeV2<V> {
                         bitset |= (1 << (7 - bit));
                         int entry;
                         if (node.next == null) {
-                            entry = encodeLookupEntry(TYPE_LEAF, getValueIndex(node.value, idxTable, tree));
+                            entry =
+                                    encodeLookupEntry(
+                                            TYPE_LEAF, getValueIndex(node.value, idxTable, tree));
                         } else {
                             int chunkIdx = processLayer(node.next, idxTable, tree);
                             entry = encodeLookupEntry(TYPE_DENSE, chunkIdx);
@@ -144,10 +148,10 @@ public class FPATreeV2<V> {
 
         Hashtable<V, Integer> idxTable = new Hashtable<>();
         FPATreeV2<V> tree = new FPATreeV2<>();
-        
+
         // 确保索引 0 保留给 null 值（与 tmp4 一致）
         tree.resultList.add(null);
-        
+
         int size = fpa.table.size(); // Layer 1 大小: 2^16 = 65536
 
         for (int i = 0; i < size; i++) {
@@ -240,16 +244,14 @@ public class FPATreeV2<V> {
 
         // 优化：整个 cluster 都是默认值
         if (bitset == 0) {
-            return resolveLookupEntry(
-                    entry.defaultValue, ipBytes, byteIdx + 1, lastFoundValue);
+            return resolveLookupEntry(entry.defaultValue, ipBytes, byteIdx + 1, lastFoundValue);
         }
 
         // 检查对应位是否为 1
         int mask = 1 << (7 - bit);
         if ((bitset & mask) == 0) {
             // 位为0，使用默认值
-            return resolveLookupEntry(
-                    entry.defaultValue, ipBytes, byteIdx + 1, lastFoundValue);
+            return resolveLookupEntry(entry.defaultValue, ipBytes, byteIdx + 1, lastFoundValue);
         }
 
         // 位为1，从lookupEntries中获取

@@ -8,9 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * 测试 BitTrie、ForwardingPortArray 和 FPATreeV2 的查询结果一致性
- */
+/** 测试 BitTrie、ForwardingPortArray 和 FPATreeV2 的查询结果一致性 */
 public class Application {
 
     public static void main(String[] args) {
@@ -26,6 +24,7 @@ public class Application {
         for (PrefixEntry entry : entries) {
             bitTrie.put(entry.ipBytes, entry.prefixLength, entry.asPath);
         }
+        bitTrie.compress();
         System.out.println("BitTrie 构建完成");
 
         // 转换为 ForwardingPortArray
@@ -43,14 +42,13 @@ public class Application {
         compareResults(entries, bitTrie, fpa, fpaTree);
     }
 
-    /**
-     * 加载 aspat.csv 文件
-     */
+    /** 加载 aspat.csv 文件 */
     private static List<PrefixEntry> loadAsPatCsv(String path) {
         List<PrefixEntry> entries = new ArrayList<>();
 
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(new FileInputStream(path), StandardCharsets.UTF_8))) {
+        try (BufferedReader reader =
+                new BufferedReader(
+                        new InputStreamReader(new FileInputStream(path), StandardCharsets.UTF_8))) {
 
             String line;
             while ((line = reader.readLine()) != null) {
@@ -92,9 +90,7 @@ public class Application {
         return entries;
     }
 
-    /**
-     * 将 IPv4 地址字符串转换为字节数组
-     */
+    /** 将 IPv4 地址字符串转换为字节数组 */
     private static byte[] ipToBytes(String ipStr) {
         String[] octets = ipStr.split("\\.");
         if (octets.length != 4) {
@@ -113,13 +109,12 @@ public class Application {
         return bytes;
     }
 
-    /**
-     * 对比 BitTrie、ForwardingPortArray 和 FPATreeV2 的查询结果
-     */
-    private static void compareResults(List<PrefixEntry> entries,
-                                       BitTrie<String> bitTrie,
-                                       ForwardingPortArray<String> fpa,
-                                       FPATreeV2<String> fpaTree) {
+    /** 对比 BitTrie、ForwardingPortArray 和 FPATreeV2 的查询结果 */
+    private static void compareResults(
+            List<PrefixEntry> entries,
+            BitTrie<String> bitTrie,
+            ForwardingPortArray<String> fpa,
+            FPATreeV2<String> fpaTree) {
         int matchCount = 0;
         int mismatchCount = 0;
         int totalCount = 0;
@@ -166,7 +161,8 @@ public class Application {
                 mismatchCount++;
                 if (printed++ < maxPrint) {
                     String ipStr = bytesToIp(testEntry.ipBytes);
-                    System.out.printf("不匹配: %s | BitTrie: %s | FPA: %s | FPATreeV2: %s%n",
+                    System.out.printf(
+                            "不匹配: %s | BitTrie: %s | FPA: %s | FPATreeV2: %s%n",
                             ipStr, bitTrieResult, fpaResult, fpaTreeResult);
                 }
             }
@@ -187,9 +183,7 @@ public class Application {
         }
     }
 
-    /**
-     * 检查三个结果是否一致
-     */
+    /** 检查三个结果是否一致 */
     private static boolean resultsMatch(String r1, String r2, String r3) {
         if (r1 == null && r2 == null && r3 == null) {
             return true;
@@ -200,9 +194,7 @@ public class Application {
         return false;
     }
 
-    /**
-     * 生成测试 IP 地址
-     */
+    /** 生成测试 IP 地址 */
     private static List<IpTestEntry> generateTestIps(List<PrefixEntry> entries) {
         List<IpTestEntry> testIps = new ArrayList<>();
 
@@ -228,20 +220,13 @@ public class Application {
         return testIps;
     }
 
-    /**
-     * 将字节数组转换为 IP 地址字符串
-     */
+    /** 将字节数组转换为 IP 地址字符串 */
     private static String bytesToIp(byte[] bytes) {
-        return String.format("%d.%d.%d.%d",
-                bytes[0] & 0xFF,
-                bytes[1] & 0xFF,
-                bytes[2] & 0xFF,
-                bytes[3] & 0xFF);
+        return String.format(
+                "%d.%d.%d.%d", bytes[0] & 0xFF, bytes[1] & 0xFF, bytes[2] & 0xFF, bytes[3] & 0xFF);
     }
 
-    /**
-     * 前缀条目
-     */
+    /** 前缀条目 */
     static class PrefixEntry {
         byte[] ipBytes;
         int prefixLength;
@@ -254,9 +239,7 @@ public class Application {
         }
     }
 
-    /**
-     * IP 测试条目
-     */
+    /** IP 测试条目 */
     static class IpTestEntry {
         byte[] ipBytes;
 

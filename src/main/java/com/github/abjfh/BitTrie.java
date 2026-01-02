@@ -1,5 +1,7 @@
 package com.github.abjfh;
 
+import java.util.Objects;
+
 public class BitTrie<V> {
     TrieNode<V> root;
 
@@ -53,6 +55,11 @@ public class BitTrie<V> {
 
         // 遍历前缀的每一位
         for (int i = 0; i < prefixLength; i++) {
+            // 父节点已经存储时，不需要创建对应字节点
+            if (node.isLeaf && Objects.equals(node.value, value)) {
+                return;
+            }
+
             // 计算当前位在字节数组中的位置
             int byteIndex = i / 8;
             if (byteIndex >= prefixKey.length) {
@@ -124,5 +131,44 @@ public class BitTrie<V> {
         }
 
         return lastFoundValue;
+    }
+
+    /**
+     * 压缩Trie树，优化节点结构：
+     * 1. 当父节点已经存储时，不需要创建对应子节点（在put方法中已实现）
+     * 2. 当左右节点都指向同一个值时，删除子节点，将父节点指向该值
+     */
+    public void compress() {
+        compressNode(root);
+    }
+
+    /**
+     * 递归压缩节点
+     * 采用后序遍历：先处理子节点，再处理当前节点
+     */
+    private void compressNode(TrieNode<V> node) {
+        if (node == null) {
+            return;
+        }
+
+        // 先递归处理左右子节点
+        compressNode(node.leftChild);
+        compressNode(node.rightChild);
+
+        // 检查是否可以压缩：左右子节点都存在且都指向相同值
+        if (node.leftChild != null && node.rightChild != null) {
+            // 如果两个子节点都是叶子节点，并且它们的值相同
+            if (node.leftChild.isLeaf && node.rightChild.isLeaf &&
+                    Objects.equals(node.leftChild.value, node.rightChild.value)) {
+
+                // 将值提升到当前节点
+                node.value = node.leftChild.value;
+                node.isLeaf = true;
+
+                // 删除子节点
+                node.leftChild = null;
+                node.rightChild = null;
+            }
+        }
     }
 }
