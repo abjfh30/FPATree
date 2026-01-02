@@ -22,7 +22,7 @@ import java.util.concurrent.TimeUnit;
 
 /** FPATreeV2 的 JMH 基准测试 测试指标：吞吐量 (ops/ms) */
 @BenchmarkMode(Mode.Throughput)
-@OutputTimeUnit(TimeUnit.MILLISECONDS)
+@OutputTimeUnit(TimeUnit.SECONDS)
 @State(Scope.Benchmark)
 @Fork(1)
 @Warmup(iterations = 5)

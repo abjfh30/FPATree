@@ -31,7 +31,6 @@ public class FPATreeV2<V> {
     static class ChunkEntry {
         short[] codeWord;
         int[] lookupEntries;
-        int defaultValue; // 整个 group 共享的默认值
     }
 
     /**
@@ -84,24 +83,10 @@ public class FPATreeV2<V> {
         for (int j = 0; j < 4; j++) {
             short[] codeWords = new short[8];
             List<Integer> lookupEntries = new LinkedList<>();
-
-            // 确定整个 group 的默认值（第一个元素）
-            ForwardingPortArray.FPANode<V> firstNode = fpa.table.get(j * 64);
-            int defaultValue;
-            if (firstNode.next == null) {
-                defaultValue =
-                        encodeLookupEntry(
-                                TYPE_LEAF, getValueIndex(firstNode.value, idxTable, tree));
-            } else {
-                int chunkIdx = processLayer(firstNode.next, idxTable, tree);
-                defaultValue = encodeLookupEntry(TYPE_DENSE, chunkIdx);
-            }
-
-            int cumulativeOnes = 0; // 累积的 cluster 中 bitset 1 的个数
+            ForwardingPortArray.FPANode<V> firstNode = null;
+            int before = 0;
 
             for (int cluster = 0; cluster < 8; cluster++) {
-                // 收集 cluster 的非默认值，确定 bitset
-                List<Integer> clusterEntries = new ArrayList<>();
                 int bitset = 0;
 
                 for (int bit = 0; bit < 8; bit++) {
@@ -116,32 +101,27 @@ public class FPATreeV2<V> {
                                     encodeLookupEntry(
                                             TYPE_LEAF, getValueIndex(node.value, idxTable, tree));
                         } else {
-                            int chunkIdx = processLayer(node.next, idxTable, tree);
-                            entry = encodeLookupEntry(TYPE_DENSE, chunkIdx);
+                            entry = processLayer(node.next, idxTable, tree);
                         }
-                        clusterEntries.add(entry);
+                        firstNode = node;
+                        lookupEntries.add(entry);
                     }
                 }
 
-                // 设置 before = cumulativeOnes
-                codeWords[cluster] = (short) ((bitset << 8) | cumulativeOnes);
-
-                // 添加非默认值到 lookupEntries
-                lookupEntries.addAll(clusterEntries);
-
-                cumulativeOnes += Integer.bitCount(bitset);
+                // 设置 before
+                codeWords[cluster] = (short) ((bitset << 8) | before);
+                before = lookupEntries.size();
             }
 
             ChunkEntry entry = new ChunkEntry();
             entry.codeWord = codeWords;
             entry.lookupEntries = lookupEntries.stream().mapToInt(Integer::intValue).toArray();
-            entry.defaultValue = defaultValue;
             group[j] = entry;
         }
 
         int chunkIdx = tree.chunkList.size();
         tree.chunkList.add(group);
-        return chunkIdx;
+        return encodeLookupEntry(TYPE_DENSE, chunkIdx);
     }
 
     public static <V> FPATreeV2<V> build(ForwardingPortArray<V> fpa) {
@@ -168,9 +148,8 @@ public class FPATreeV2<V> {
                 int valueIdx = getValueIndex(node.value, idxTable, tree);
                 tree.rootChunk[group1][bit1] = encodeLookupEntry(TYPE_LEAF, valueIdx);
             } else {
-                // [情况2] 有子树：构建 Layer 2 chunk (非最后一层)
-                int chunkIdx = processLayer(node.next, idxTable, tree);
-                tree.rootChunk[group1][bit1] = encodeLookupEntry(TYPE_DENSE, chunkIdx);
+                // [情况2] 有子树
+                tree.rootChunk[group1][bit1] = processLayer(node.next, idxTable, tree);
             }
         }
 
@@ -184,11 +163,9 @@ public class FPATreeV2<V> {
      * @return 查找到的值，未找到返回 null
      */
     public V search(byte[] ipBytes) {
-        if (ipBytes == null || ipBytes.length < 4) {
+        if (ipBytes == null || ipBytes.length != 4) {
             return null;
         }
-
-        V lastFoundValue = null;
 
         // Layer 1: 提取前 16 位
         int index16 = ((ipBytes[0] & 0xFF) << 8) | (ipBytes[1] & 0xFF);
@@ -196,21 +173,7 @@ public class FPATreeV2<V> {
         int bit1 = index16 & 0b111111;
 
         int entry = rootChunk[group1][bit1];
-        if (entry != 0) {
-            int type = entry >>> 30;
-            int index = entry & 0x3FFFFFFF;
-
-            if (type == TYPE_LEAF) {
-                lastFoundValue = resultList.get(index);
-            } else if (type == TYPE_DENSE) {
-                V value = searchInChunk(index, ipBytes, 2, lastFoundValue);
-                if (value != null) {
-                    lastFoundValue = value;
-                }
-            }
-        }
-
-        return lastFoundValue;
+        return resolveLookupEntry(entry, ipBytes, 2);
     }
 
     /**
@@ -219,15 +182,10 @@ public class FPATreeV2<V> {
      * @param chunkIdx chunkList 中的索引
      * @param ipBytes IP 地址字节数组
      * @param byteIdx 当前使用的字节索引 (2 或 3)
-     * @param lastFoundValue 当前已找到的最长匹配值
      * @return 查找到的值
      */
-    private V searchInChunk(int chunkIdx, byte[] ipBytes, int byteIdx, V lastFoundValue) {
+    private V searchInChunk(int chunkIdx, byte[] ipBytes, int byteIdx) {
         ChunkEntry[] group = chunkList.get(chunkIdx);
-
-        if (byteIdx >= ipBytes.length) {
-            return lastFoundValue;
-        }
 
         int index8 = ipBytes[byteIdx] & 0xFF;
         int groupIdx = index8 >> 6; // 0-3
@@ -241,31 +199,13 @@ public class FPATreeV2<V> {
         short codeWord = entry.codeWord[cluster];
         int bitset = (codeWord >> 8) & 0xFF;
         int before = codeWord & 0xFF;
-
-        // 优化：整个 cluster 都是默认值
-        if (bitset == 0) {
-            return resolveLookupEntry(entry.defaultValue, ipBytes, byteIdx + 1, lastFoundValue);
-        }
-
-        // 检查对应位是否为 1
-        int mask = 1 << (7 - bit);
-        if ((bitset & mask) == 0) {
-            // 位为0，使用默认值
-            return resolveLookupEntry(entry.defaultValue, ipBytes, byteIdx + 1, lastFoundValue);
-        }
-
         // 位为1，从lookupEntries中获取
         // 计算簇内该位置之前的1的个数
-        int shifted = bitset >> (8 - bit);
-        int onesInCluster = INDEX_TABLE[shifted & 0xFF];
-        int lookupIdx = before + onesInCluster;
+        int shifted = bitset >> (8 - bit - 1);
+        int onesInCluster = INDEX_TABLE[shifted];
+        int lookupIdx = before + onesInCluster - 1;
 
-        if (lookupIdx >= entry.lookupEntries.length) {
-            return lastFoundValue;
-        }
-
-        return resolveLookupEntry(
-                entry.lookupEntries[lookupIdx], ipBytes, byteIdx + 1, lastFoundValue);
+        return resolveLookupEntry(entry.lookupEntries[lookupIdx], ipBytes, byteIdx + 1);
     }
 
     /**
@@ -274,25 +214,19 @@ public class FPATreeV2<V> {
      * @param lookupEntry 编码的入口
      * @param ipBytes IP 地址字节数组（用于 Layer 3 查询）
      * @param byteIdx 下一个字节索引
-     * @param lastFoundValue 当前已找到的最长匹配值
      * @return 最终值
      */
-    private V resolveLookupEntry(int lookupEntry, byte[] ipBytes, int byteIdx, V lastFoundValue) {
-        if (lookupEntry == 0) {
-            return lastFoundValue;
-        }
+    private V resolveLookupEntry(int lookupEntry, byte[] ipBytes, int byteIdx) {
+
         int type = lookupEntry >>> 30;
         int index = lookupEntry & 0x3FFFFFFF;
 
         if (type == TYPE_LEAF) {
-            V value = resultList.get(index);
-            // 只有当值非 null 时才更新，否则保留 lastFoundValue
-            return (value != null) ? value : lastFoundValue;
+            return resultList.get(index);
         } else if (type == TYPE_DENSE) {
             // 继续查询 Layer 3
-            V value = searchInChunk(index, ipBytes, byteIdx, lastFoundValue);
-            return value;
+            return searchInChunk(index, ipBytes, byteIdx);
         }
-        return lastFoundValue;
+        return null;
     }
 }
