@@ -3,17 +3,12 @@ package com.github.abjfh;
 import java.util.LinkedList;
 import java.util.Queue;
 
-/**
- * 将 BitTrie 转换为分层 ForwardingPortArray 的转换器
- */
+/** 将 BitTrie 转换为分层 ForwardingPortArray 的转换器 */
 public class TrieToFPAConverter {
-    private static final int[] depths = new int[]{16, 8, 8};
+    private static final int[] depths = new int[] {16, 8, 8};
 
-    /**
-     * 创建转换器
-     */
-    private TrieToFPAConverter() {
-    }
+    /** 创建转换器 */
+    private TrieToFPAConverter() {}
 
     /**
      * 将 BitTrie 转换为 ForwardingPortArray
@@ -35,9 +30,9 @@ public class TrieToFPAConverter {
     /**
      * 填充指定层级的 ForwardingPortArray
      *
-     * @param fpa            要填充的 ForwardingPortArray
-     * @param trieNode       对应的 Trie 节点
-     * @param depth          当前层的深度
+     * @param fpa 要填充的 ForwardingPortArray
+     * @param trieNode 对应的 Trie 节点
+     * @param depth 当前层的深度
      * @param nextDepthIndex 下一层在 depths 数组中的索引
      */
     private static <V> void fillLevel(
@@ -73,7 +68,8 @@ public class TrieToFPAConverter {
                     }
                 }
 
-                // 叶子节点处理
+                // 有值的节点处理：填充所有有值的节点（包括有子节点的中间节点）
+                // 这确保了中间节点的值被正确传播到 FPA
                 ForwardingPortArray.FPANode<V> newNode = new ForwardingPortArray.FPANode<>();
                 if (currentDepth <= depth && currentNode.node.isLeaf) {
                     newNode.value = currentNode.node.value;
@@ -97,7 +93,7 @@ public class TrieToFPAConverter {
 
                     fpa.table.set(
                             currentNode.leftBound,
-                            new ForwardingPortArray.FPANode<>(nextFPA));
+                            new ForwardingPortArray.FPANode<>(node.value, nextFPA));
 
                     // 递归填充下一层
                     fillLevel(nextFPA, currentNode.node, nextDepth, nextDepthIndex + 1);

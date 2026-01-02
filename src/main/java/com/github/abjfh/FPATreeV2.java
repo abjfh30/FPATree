@@ -1,12 +1,5 @@
 package com.github.abjfh;
 
-import inet.ipaddr.AddressStringException;
-import inet.ipaddr.IPAddress;
-import inet.ipaddr.IPAddressString;
-
-import java.io.BufferedReader;
-import java.io.FileReader;
-import java.io.IOException;
 import java.util.*;
 
 public class FPATreeV2<V> {
@@ -36,9 +29,9 @@ public class FPATreeV2<V> {
     }
 
     static class ChunkEntry {
-        // bitset 8 | before 8 或 prefix 8 | mask 8
         short[] codeWord;
         int[] lookupEntries;
+        int defaultValue;  // 整个 group 共享的默认值
     }
 
     /**
@@ -92,50 +85,56 @@ public class FPATreeV2<V> {
             short[] codeWords = new short[8];
             List<Integer> lookupEntries = new LinkedList<>();
 
+            // 确定整个 group 的默认值（第一个元素）
             ForwardingPortArray.FPANode<V> firstNode = fpa.table.get(j * 64);
-            int count = 0;
+            int defaultValue;
+            if (firstNode.next == null) {
+                defaultValue = encodeLookupEntry(TYPE_LEAF, getValueIndex(firstNode.value, idxTable, tree));
+            } else {
+                int chunkIdx = processLayer(firstNode.next, idxTable, tree);
+                defaultValue = encodeLookupEntry(TYPE_DENSE, chunkIdx);
+            }
 
-            for (int k = 0; k < 64; k++) {
-                int idx = j * 64 + k;
-                int cluster = (idx >> 3) & 0b111;
-                int bit = idx & 0b111;
+            int cumulativeOnes = 0;  // 累积的 cluster 中 bitset 1 的个数
 
-                ForwardingPortArray.FPANode<V> nextNode = fpa.table.get(idx);
+            for (int cluster = 0; cluster < 8; cluster++) {
+                // 收集 cluster 的非默认值，确定 bitset
+                List<Integer> clusterEntries = new ArrayList<>();
+                int bitset = 0;
 
-                if (!Objects.equals(firstNode, nextNode)) {
-                    // 设置 bitset
-                    codeWords[cluster] |= (short) (1 << 8 << (8 - bit - 1));
+                for (int bit = 0; bit < 8; bit++) {
+                    int k = cluster * 8 + bit;
+                    ForwardingPortArray.FPANode<V> node = fpa.table.get(j * 64 + k);
 
-                    // 处理节点
-                    int lookupEntry;
-                    if (nextNode.next == null) {
-                        // 最后一层或叶子节点：存储值索引
-                        int valueIdx = getValueIndex(nextNode.value, idxTable, tree);
-                        lookupEntry = encodeLookupEntry(TYPE_LEAF, valueIdx);
-                    } else {
-                        // 有子树：递归处理下一层
-                        int chunkIdx = processLayer(nextNode.next, idxTable, tree);
-                        lookupEntry = encodeLookupEntry(TYPE_DENSE, chunkIdx);
+                    if (!Objects.equals(firstNode, node)) {
+                        bitset |= (1 << (7 - bit));
+                        int entry;
+                        if (node.next == null) {
+                            entry = encodeLookupEntry(TYPE_LEAF, getValueIndex(node.value, idxTable, tree));
+                        } else {
+                            int chunkIdx = processLayer(node.next, idxTable, tree);
+                            entry = encodeLookupEntry(TYPE_DENSE, chunkIdx);
+                        }
+                        clusterEntries.add(entry);
                     }
-
-                    lookupEntries.add(lookupEntry);
-                    count++;
-                    firstNode = nextNode;
                 }
 
-                // 每 8 个元素设置 before 值
-                if (k > 0 && k % 8 == 0) {
-                    codeWords[cluster] |= (short) count;
-                }
+                // 设置 before = cumulativeOnes
+                codeWords[cluster] = (short) ((bitset << 8) | cumulativeOnes);
+
+                // 添加非默认值到 lookupEntries
+                lookupEntries.addAll(clusterEntries);
+
+                cumulativeOnes += Integer.bitCount(bitset);
             }
 
             ChunkEntry entry = new ChunkEntry();
             entry.codeWord = codeWords;
             entry.lookupEntries = lookupEntries.stream().mapToInt(Integer::intValue).toArray();
+            entry.defaultValue = defaultValue;
             group[j] = entry;
         }
 
-        // 将 group 加入 chunkList
         int chunkIdx = tree.chunkList.size();
         tree.chunkList.add(group);
         return chunkIdx;
@@ -145,6 +144,10 @@ public class FPATreeV2<V> {
 
         Hashtable<V, Integer> idxTable = new Hashtable<>();
         FPATreeV2<V> tree = new FPATreeV2<>();
+        
+        // 确保索引 0 保留给 null 值（与 tmp4 一致）
+        tree.resultList.add(null);
+        
         int size = fpa.table.size(); // Layer 1 大小: 2^16 = 65536
 
         for (int i = 0; i < size; i++) {
@@ -171,155 +174,123 @@ public class FPATreeV2<V> {
     }
 
     /**
-     * 主函数：使用 aspat.csv 数据测试 FPATreeV2 构建
+     * 查询 IP 地址对应的值（最长前缀匹配）
+     *
+     * @param ipBytes IP 地址的字节数组 (IPv4: 4字节)
+     * @return 查找到的值，未找到返回 null
      */
-    public static void main(String[] args) {
-        String csvFile = "data/aspat.csv";
-        int lineCount = 0;
-        int maxLines = 10000; // 限制读取行数用于测试
-
-        System.out.println("开始测试 FPATreeV2 构建...");
-        System.out.println("数据文件: " + csvFile);
-        System.out.println("最大行数: " + maxLines);
-        System.out.println();
-
-        // 1. 构建 BitTrie
-        BitTrie<String> trie = new BitTrie<>();
-
-        try (BufferedReader br = new BufferedReader(new FileReader(csvFile))) {
-            String line;
-            while ((line = br.readLine()) != null && lineCount < maxLines) {
-                lineCount++;
-                if (lineCount % 1000 == 0) {
-                    System.out.println("已处理 " + lineCount + " 行...");
-                }
-
-                // 解析 CSV: 前缀/长度,AS路径
-                String[] parts = line.split(",", 2);
-                if (parts.length < 2) continue;
-
-                // 解析 IP 前缀
-                IPAddress prefix;
-                try {
-                    prefix = new IPAddressString(parts[0].trim()).toAddress();
-                } catch (AddressStringException e) {
-                    continue; // 跳过无效的 IP 地址
-                }
-                // 获取字节数组：IPv4 为 4 字节
-                byte[] bytes;
-                if (prefix.isIPv4()) {
-                    bytes = prefix.toIPv4().getBytes();
-                } else {
-                    bytes = prefix.toIPv6().getBytes();
-                }
-                int prefixLength = prefix.getNetworkPrefixLength();
-
-                // AS 路径作为值
-                String asPath = parts[1].trim();
-
-                // 插入 Trie
-                trie.put(bytes, prefixLength, asPath);
-            }
-        } catch (IOException e) {
-            System.err.println("读取文件失败: " + e.getMessage());
-            return;
+    public V search(byte[] ipBytes) {
+        if (ipBytes == null || ipBytes.length < 4) {
+            return null;
         }
 
-        System.out.println();
-        System.out.println("=== BitTrie 构建完成 ===");
-        System.out.println("总前缀数: " + lineCount);
+        V lastFoundValue = null;
 
-        // 2. 转换为 ForwardingPortArray
-        long startTime = System.currentTimeMillis();
-        ForwardingPortArray<String> fpa = TrieToFPAConverter.convert(trie);
-        long convertTime = System.currentTimeMillis() - startTime;
+        // Layer 1: 提取前 16 位
+        int index16 = ((ipBytes[0] & 0xFF) << 8) | (ipBytes[1] & 0xFF);
+        int group1 = index16 >> 6;
+        int bit1 = index16 & 0b111111;
 
-        System.out.println("ForwardingPortArray 转换耗时: " + convertTime + " ms");
+        int entry = rootChunk[group1][bit1];
+        if (entry != 0) {
+            int type = entry >>> 30;
+            int index = entry & 0x3FFFFFFF;
 
-        // 3. 构建 FPATreeV2
-        startTime = System.currentTimeMillis();
-        FPATreeV2<String> tree = FPATreeV2.build(fpa);
-        long buildTime = System.currentTimeMillis() - startTime;
-
-        System.out.println();
-        System.out.println("=== FPATreeV2 构建完成 ===");
-        System.out.println("构建耗时: " + buildTime + " ms");
-
-        // 4. 输出统计信息
-        System.out.println();
-        System.out.println("=== 统计信息 ===");
-
-        // 统计 rootChunk 类型分布
-        int leafCount = 0;
-        int denseCount = 0;
-        int nullCount = 0;
-
-        for (int i = 0; i < tree.rootChunk.length; i++) {
-            for (int j = 0; j < tree.rootChunk[i].length; j++) {
-                int entry = tree.rootChunk[i][j];
-                if (entry == 0) {
-                    nullCount++;
-                } else {
-                    int type = entry >>> 30;
-                    if (type == TYPE_LEAF) {
-                        leafCount++;
-                    } else if (type == TYPE_DENSE) {
-                        denseCount++;
-                    }
+            if (type == TYPE_LEAF) {
+                lastFoundValue = resultList.get(index);
+            } else if (type == TYPE_DENSE) {
+                V value = searchInChunk(index, ipBytes, 2, lastFoundValue);
+                if (value != null) {
+                    lastFoundValue = value;
                 }
             }
         }
 
-        System.out.println("Layer 1 (rootChunk):");
-        System.out.println("  - LEAF 类型: " + leafCount);
-        System.out.println("  - DENSE 类型: " + denseCount);
-        System.out.println("  - 空值 (0): " + nullCount);
-        System.out.println("  - 总条目: " + (tree.rootChunk.length * tree.rootChunk[0].length));
+        return lastFoundValue;
+    }
 
-        System.out.println();
-        System.out.println("Layer 2/3 (chunkList):");
-        System.out.println("  - Chunk 数量: " + tree.chunkList.size());
+    /**
+     * 在 Chunk 中查询（Layer 2 或 Layer 3），支持最长前缀匹配
+     *
+     * @param chunkIdx chunkList 中的索引
+     * @param ipBytes IP 地址字节数组
+     * @param byteIdx 当前使用的字节索引 (2 或 3)
+     * @param lastFoundValue 当前已找到的最长匹配值
+     * @return 查找到的值
+     */
+    private V searchInChunk(int chunkIdx, byte[] ipBytes, int byteIdx, V lastFoundValue) {
+        ChunkEntry[] group = chunkList.get(chunkIdx);
 
-        int totalLookupEntries = 0;
-        for (ChunkEntry[] group : tree.chunkList) {
-            for (ChunkEntry entry : group) {
-                if (entry.lookupEntries != null) {
-                    totalLookupEntries += entry.lookupEntries.length;
-                }
-            }
-        }
-        System.out.println("  - 总 lookupEntry 数: " + totalLookupEntries);
-
-        System.out.println();
-        System.out.println("resultList (去重值):");
-        System.out.println("  - 唯一值数量: " + tree.resultList.size());
-
-        // 5. 简单查询测试
-        System.out.println();
-        System.out.println("=== 查询测试 ===");
-
-        // 测试几个已知的前缀
-        String[] testPrefixes = {
-            "1.0.0.0/24", "8.8.8.0/24", "192.168.0.0/16", "10.0.0.0/8"
-        };
-
-        for (String prefixStr : testPrefixes) {
-            try {
-                IPAddress prefix = new IPAddressString(prefixStr).toAddress();
-                byte[] bytes;
-                if (prefix.isIPv4()) {
-                    bytes = prefix.toIPv4().getBytes();
-                } else {
-                    bytes = prefix.toIPv6().getBytes();
-                }
-                String result = trie.get(bytes);
-                System.out.println(prefixStr + " -> " + (result != null ? result : "未找到"));
-            } catch (AddressStringException e) {
-                System.out.println(prefixStr + " -> 无效地址");
-            }
+        if (byteIdx >= ipBytes.length) {
+            return lastFoundValue;
         }
 
-        System.out.println();
-        System.out.println("=== 测试完成 ===");
+        int index8 = ipBytes[byteIdx] & 0xFF;
+        int groupIdx = index8 >> 6; // 0-3
+        int bitIdx = index8 & 0b111111; // 0-63
+
+        ChunkEntry entry = group[groupIdx];
+
+        int cluster = bitIdx >> 3;
+        int bit = bitIdx & 0b111;
+
+        short codeWord = entry.codeWord[cluster];
+        int bitset = (codeWord >> 8) & 0xFF;
+        int before = codeWord & 0xFF;
+
+        // 优化：整个 cluster 都是默认值
+        if (bitset == 0) {
+            return resolveLookupEntry(
+                    entry.defaultValue, ipBytes, byteIdx + 1, lastFoundValue);
+        }
+
+        // 检查对应位是否为 1
+        int mask = 1 << (7 - bit);
+        if ((bitset & mask) == 0) {
+            // 位为0，使用默认值
+            return resolveLookupEntry(
+                    entry.defaultValue, ipBytes, byteIdx + 1, lastFoundValue);
+        }
+
+        // 位为1，从lookupEntries中获取
+        // 计算簇内该位置之前的1的个数
+        int shifted = bitset >> (8 - bit);
+        int onesInCluster = INDEX_TABLE[shifted & 0xFF];
+        int lookupIdx = before + onesInCluster;
+
+        if (lookupIdx >= entry.lookupEntries.length) {
+            return lastFoundValue;
+        }
+
+        return resolveLookupEntry(
+                entry.lookupEntries[lookupIdx], ipBytes, byteIdx + 1, lastFoundValue);
+    }
+
+    /**
+     * 解析 lookupEntry，支持最长前缀匹配
+     *
+     * @param lookupEntry 编码的入口
+     * @param ipBytes IP 地址字节数组（用于 Layer 3 查询）
+     * @param byteIdx 下一个字节索引
+     * @param lastFoundValue 当前已找到的最长匹配值
+     * @return 最终值
+     */
+    private V resolveLookupEntry(int lookupEntry, byte[] ipBytes, int byteIdx, V lastFoundValue) {
+        if (lookupEntry == 0) {
+            return lastFoundValue;
+        }
+        int type = lookupEntry >>> 30;
+        int index = lookupEntry & 0x3FFFFFFF;
+
+        if (type == TYPE_LEAF) {
+            V value = resultList.get(index);
+            // 只有当值非 null 时才更新，否则保留 lastFoundValue
+            return (value != null) ? value : lastFoundValue;
+        } else if (type == TYPE_DENSE) {
+            // 继续查询 Layer 3
+            V value = searchInChunk(index, ipBytes, byteIdx, lastFoundValue);
+            return value;
+        }
+        return lastFoundValue;
     }
 }
