@@ -13,11 +13,12 @@ public class FPATreeV2<V> {
     // lookupEntry 类型常量
     private static final int TYPE_LEAF = 0; // 00: 值索引 (指向 resultList)
     private static final int TYPE_DENSE = 1; // 01: 非稀疏 chunk 索引 (指向 chunkList)
-    // TYPE_SPARSE 暂不实现
+    private static final int TYPE_SPARSE = 2; // 02: 稀疏 chunk 索引 (指向 sparseChunkList)
 
-    int K = 3;
+    int K = 32;
     int[][] rootChunk = new int[LAYER1_GROUP_COUNT][GROUP_SIZE];
     List<ChunkEntry[]> chunkList = new ArrayList<>();
+    List<ChunkEntry> sparseChunkList = new ArrayList<>();
     List<V> resultList = new ArrayList<>();
     // Index Table: 256条目，记录每种8位组合中1的个数
     static final byte[] INDEX_TABLE = new byte[256];
@@ -29,8 +30,27 @@ public class FPATreeV2<V> {
     }
 
     static class ChunkEntry {
-        short[] codeWord;
+        short[] codeWords;
         int[] lookupEntries;
+    }
+
+    static class SparseChunkEntry implements Comparable<SparseChunkEntry> {
+        short codeWord;
+        int lookupEntry;
+
+        @Override
+        public int compareTo(SparseChunkEntry o) {
+            // 先按前缀长度降序排序（最长前缀优先）
+            int prefixLen1 = this.codeWord & 0xFF;
+            int prefixLen2 = o.codeWord & 0xFF;
+            if (prefixLen1 != prefixLen2) {
+                return prefixLen2 - prefixLen1;  // 降序
+            }
+            // 前缀长度相同时，按mask升序排序
+            int mask1 = (this.codeWord >> 8) & 0xFF;
+            int mask2 = (o.codeWord >> 8) & 0xFF;
+            return mask1 - mask2;
+        }
     }
 
     /**
@@ -79,7 +99,7 @@ public class FPATreeV2<V> {
     private static <V> int processLayer(
             ForwardingPortArray<V> fpa, Hashtable<V, Integer> idxTable, FPATreeV2<V> tree) {
         ChunkEntry[] group = new ChunkEntry[4];
-
+        int totalEntries = 0;
         for (int j = 0; j < 4; j++) {
             short[] codeWords = new short[8];
             List<Integer> lookupEntries = new LinkedList<>();
@@ -114,14 +134,56 @@ public class FPATreeV2<V> {
             }
 
             ChunkEntry entry = new ChunkEntry();
-            entry.codeWord = codeWords;
+            entry.codeWords = codeWords;
             entry.lookupEntries = lookupEntries.stream().mapToInt(Integer::intValue).toArray();
+            totalEntries += entry.lookupEntries.length;
             group[j] = entry;
         }
+        if (totalEntries > tree.K) {
+            int chunkIdx = tree.chunkList.size();
+            tree.chunkList.add(group);
+            return encodeLookupEntry(TYPE_DENSE, chunkIdx);
+        } else {
+            return processLayer(fpa, tree, group);
+        }
+    }
 
-        int chunkIdx = tree.chunkList.size();
-        tree.chunkList.add(group);
-        return encodeLookupEntry(TYPE_DENSE, chunkIdx);
+    private static <V> int processLayer(
+            ForwardingPortArray<V> fpa, FPATreeV2<V> tree, ChunkEntry[] group) {
+        BitTrie<Integer> trie = new BitTrie<>();
+        byte[] bytes = new byte[1];
+        for (int i = 0; i < fpa.table.size(); i++) {
+            int lookupEntry = searchLookupEntry(group, i);
+            bytes[0] = (byte) i;  // 把索引i作为key（0-255）
+            trie.put(bytes, 8, lookupEntry);  // lookupEntry作为value
+        }
+        trie.compress();
+        LinkedList<SparseChunkEntry> sparseChunkEntries = new LinkedList<>();
+        trie.preorderTraversalIterative(
+                (prefix, v) -> {
+                    SparseChunkEntry entry = new SparseChunkEntry();
+                    for (int i = 0; i < prefix.size(); i++) {
+                        if (prefix.get(i)) {
+                            entry.codeWord |= (short) (1 << (7 - i + 8));
+                        }
+                    }
+                    entry.codeWord |= (short) (prefix.size() & 0xFF);
+                    entry.lookupEntry = v;
+                    sparseChunkEntries.add(entry);
+                });
+        Collections.sort(sparseChunkEntries);
+        ChunkEntry chunkEntry = new ChunkEntry();
+        chunkEntry.lookupEntries = new int[sparseChunkEntries.size()];
+        chunkEntry.codeWords = new short[sparseChunkEntries.size()];
+        for (int i = 0; i < sparseChunkEntries.size(); i++) {
+            SparseChunkEntry entry = sparseChunkEntries.get(i);
+            chunkEntry.lookupEntries[i] = entry.lookupEntry;
+            chunkEntry.codeWords[i] = entry.codeWord;
+        }
+        int entryIdx = tree.sparseChunkList.size();
+        tree.sparseChunkList.add(chunkEntry);
+
+        return encodeLookupEntry(TYPE_SPARSE, entryIdx);
     }
 
     public static <V> FPATreeV2<V> build(ForwardingPortArray<V> fpa) {
@@ -129,7 +191,7 @@ public class FPATreeV2<V> {
         Hashtable<V, Integer> idxTable = new Hashtable<>();
         FPATreeV2<V> tree = new FPATreeV2<>();
 
-        // 确保索引 0 保留给 null 值（与 tmp4 一致）
+        // 确保索引 0 保留给 null 值
         tree.resultList.add(null);
 
         int size = fpa.table.size(); // Layer 1 大小: 2^16 = 65536
@@ -186,8 +248,12 @@ public class FPATreeV2<V> {
      */
     private V searchInChunk(int chunkIdx, byte[] ipBytes, int byteIdx) {
         ChunkEntry[] group = chunkList.get(chunkIdx);
+        int lookupEntry = searchLookupEntry(group, ipBytes[byteIdx] & 0xFF);
+        return resolveLookupEntry(lookupEntry, ipBytes, byteIdx + 1);
+    }
 
-        int index8 = ipBytes[byteIdx] & 0xFF;
+    private static int searchLookupEntry(ChunkEntry[] group, int index8) {
+
         int groupIdx = index8 >> 6; // 0-3
         int bitIdx = index8 & 0b111111; // 0-63
 
@@ -196,7 +262,7 @@ public class FPATreeV2<V> {
         int cluster = bitIdx >> 3;
         int bit = bitIdx & 0b111;
 
-        short codeWord = entry.codeWord[cluster];
+        short codeWord = entry.codeWords[cluster];
         int bitset = (codeWord >> 8) & 0xFF;
         int before = codeWord & 0xFF;
         // 位为1，从lookupEntries中获取
@@ -205,7 +271,7 @@ public class FPATreeV2<V> {
         int onesInCluster = INDEX_TABLE[shifted];
         int lookupIdx = before + onesInCluster - 1;
 
-        return resolveLookupEntry(entry.lookupEntries[lookupIdx], ipBytes, byteIdx + 1);
+        return entry.lookupEntries[lookupIdx];
     }
 
     /**
@@ -226,6 +292,30 @@ public class FPATreeV2<V> {
         } else if (type == TYPE_DENSE) {
             // 继续查询 Layer 3
             return searchInChunk(index, ipBytes, byteIdx);
+        } else if (type == TYPE_SPARSE) {
+            return searchInSparseChunk(index, ipBytes, byteIdx);
+        }
+        return null;
+    }
+
+    private V searchInSparseChunk(int chunkIdx, byte[] ipBytes, int byteIdx) {
+        ChunkEntry chunkEntry = sparseChunkList.get(chunkIdx);
+        byte ipByte = ipBytes[byteIdx];
+        for (int i = chunkEntry.codeWords.length - 1; i >= 0; i--) {
+            short codeWord = chunkEntry.codeWords[i];
+            // 提取前缀长度和前缀值
+            int prefixLen = codeWord & 0xFF;
+            int prefixVal = (codeWord >> 8) & 0xFF;
+            // prefixLen=0 表示默认匹配所有
+            if (prefixLen == 0) {
+                return resolveLookupEntry(chunkEntry.lookupEntries[i], ipBytes, byteIdx + 1);
+            }
+            // 检查 ipByte 的高 prefixLen 位是否等于 prefixVal 的高 prefixLen 位
+            int ipPrefix = (ipByte & 0xFF) >>> (8 - prefixLen);
+            int valPrefix = prefixVal >>> (8 - prefixLen);
+            if (ipPrefix == valPrefix) {
+                return resolveLookupEntry(chunkEntry.lookupEntries[i], ipBytes, byteIdx + 1);
+            }
         }
         return null;
     }

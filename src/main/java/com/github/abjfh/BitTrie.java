@@ -1,6 +1,7 @@
 package com.github.abjfh;
 
-import java.util.Objects;
+import java.util.*;
+import java.util.function.BiConsumer;
 
 public class BitTrie<V> {
     TrieNode<V> root;
@@ -133,19 +134,12 @@ public class BitTrie<V> {
         return lastFoundValue;
     }
 
-    /**
-     * 压缩Trie树，优化节点结构：
-     * 1. 当父节点已经存储时，不需要创建对应子节点（在put方法中已实现）
-     * 2. 当左右节点都指向同一个值时，删除子节点，将父节点指向该值
-     */
+    /** 压缩Trie树，优化节点结构： 1. 当父节点已经存储时，不需要创建对应子节点（在put方法中已实现） 2. 当左右节点都指向同一个值时，删除子节点，将父节点指向该值 */
     public void compress() {
         compressNode(root);
     }
 
-    /**
-     * 递归压缩节点
-     * 采用后序遍历：先处理子节点，再处理当前节点
-     */
+    /** 递归压缩节点 采用后序遍历：先处理子节点，再处理当前节点 */
     private void compressNode(TrieNode<V> node) {
         if (node == null) {
             return;
@@ -158,8 +152,9 @@ public class BitTrie<V> {
         // 检查是否可以压缩：左右子节点都存在且都指向相同值
         if (node.leftChild != null && node.rightChild != null) {
             // 如果两个子节点都是叶子节点，并且它们的值相同
-            if (node.leftChild.isLeaf && node.rightChild.isLeaf &&
-                    Objects.equals(node.leftChild.value, node.rightChild.value)) {
+            if (node.leftChild.isLeaf
+                    && node.rightChild.isLeaf
+                    && Objects.equals(node.leftChild.value, node.rightChild.value)) {
 
                 // 将值提升到当前节点
                 node.value = node.leftChild.value;
@@ -168,6 +163,36 @@ public class BitTrie<V> {
                 // 删除子节点
                 node.leftChild = null;
                 node.rightChild = null;
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public void preorderTraversalIterative(BiConsumer<List<Boolean>, V> consumer) {
+
+        // 使用栈存储节点、深度、路径和位序列
+        Deque<Object[]> stack = new ArrayDeque<>();
+        stack.push(new Object[] {root, new ArrayList<Boolean>()});
+
+        while (!stack.isEmpty()) {
+            Object[] item = stack.pop();
+            TrieNode<V> node = (TrieNode<V>) item[0];
+            List<Boolean> path = (List<Boolean>) item[1];
+            // 只记录真正的叶子节点（没有子节点的叶子节点）
+            if (node.isLeaf && !node.hasChild()) {
+                consumer.accept(path, node.value);
+            }
+
+            // 先压入右子节点，再压入左子节点（栈是LIFO）
+            if (node.rightChild != null) {
+                List<Boolean> newPath = new ArrayList<>(path);
+                newPath.add(true);
+                stack.push(new Object[] {node.rightChild, newPath});
+            }
+            if (node.leftChild != null) {
+                List<Boolean> newPath = new ArrayList<>(path);
+                newPath.add(false);
+                stack.push(new Object[] {node.leftChild, newPath});
             }
         }
     }
