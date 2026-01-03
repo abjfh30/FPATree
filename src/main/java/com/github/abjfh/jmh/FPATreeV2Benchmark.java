@@ -41,8 +41,9 @@ public class FPATreeV2Benchmark {
 
     private FPATreeV2<String> fpaTree;
     private List<byte[]> testIps;
+    FPATreeV3<String> v3;
 
-    @Setup(Level.Trial)
+    @Setup
     public void setup() {
         String csvPath = "data/aspat.csv";
 
@@ -67,6 +68,7 @@ public class FPATreeV2Benchmark {
         System.out.println("正在构建 FPATreeV2...");
         fpaTree = FPATreeV2.build(fpa);
         System.out.println("FPATreeV2 构建完成");
+        v3 = FPATreeV3.build(fpa);
 
         // 生成测试 IP 地址
         System.out.println("正在生成测试 IP...");
@@ -82,9 +84,15 @@ public class FPATreeV2Benchmark {
         ip = testIps.get(random.nextInt(testIps.size()));
     }
 
+    //    @Benchmark
+    //    public void benchmarkSearch(Blackhole bh) {
+    //        String result = fpaTree.search(ip);
+    //        bh.consume(result);
+    //    }
+
     @Benchmark
-    public void benchmarkSearch(Blackhole bh) {
-        String result = fpaTree.search(ip);
+    public void benchmarkV3Search(Blackhole bh) {
+        String result = v3.search(ip);
         bh.consume(result);
     }
 

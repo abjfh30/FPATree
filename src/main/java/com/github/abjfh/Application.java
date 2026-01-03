@@ -34,8 +34,11 @@ public class Application {
 
         // 构建 FPATreeV2
         System.out.println("\n正在构建 FPATreeV2...");
-        FPATreeV2<String> fpaTree = FPATreeV2.build(fpa);
+        FPATreeV3<String> fpaTree = FPATreeV3.build(fpa);
         System.out.println("FPATreeV2 构建完成");
+
+        // 输出存储统计
+        //        fpaTree.printMemoryStats();
 
         // 对比查询结果
         System.out.println("\n开始对比查询结果...");
@@ -114,7 +117,7 @@ public class Application {
             List<PrefixEntry> entries,
             BitTrie<String> bitTrie,
             ForwardingPortArray<String> fpa,
-            FPATreeV2<String> fpaTree) {
+            FPATreeV3<String> fpaTree) {
         int matchCount = 0;
         int mismatchCount = 0;
         int totalCount = 0;

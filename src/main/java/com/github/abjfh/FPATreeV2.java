@@ -15,7 +15,7 @@ public class FPATreeV2<V> {
     private static final int TYPE_DENSE = 1; // 01: 非稀疏 chunk 索引 (指向 chunkList)
     private static final int TYPE_SPARSE = 2; // 02: 稀疏 chunk 索引 (指向 sparseChunkList)
 
-    int K = 32;
+    int K = 8;
     int[][] rootChunk = new int[LAYER1_GROUP_COUNT][GROUP_SIZE];
     List<ChunkEntry[]> chunkList = new ArrayList<>();
     List<ChunkEntry> sparseChunkList = new ArrayList<>();
@@ -44,7 +44,7 @@ public class FPATreeV2<V> {
             int prefixLen1 = this.codeWord & 0xFF;
             int prefixLen2 = o.codeWord & 0xFF;
             if (prefixLen1 != prefixLen2) {
-                return prefixLen2 - prefixLen1;  // 降序
+                return prefixLen2 - prefixLen1; // 降序
             }
             // 前缀长度相同时，按mask升序排序
             int mask1 = (this.codeWord >> 8) & 0xFF;
@@ -154,8 +154,8 @@ public class FPATreeV2<V> {
         byte[] bytes = new byte[1];
         for (int i = 0; i < fpa.table.size(); i++) {
             int lookupEntry = searchLookupEntry(group, i);
-            bytes[0] = (byte) i;  // 把索引i作为key（0-255）
-            trie.put(bytes, 8, lookupEntry);  // lookupEntry作为value
+            bytes[0] = (byte) i; // 把索引i作为key（0-255）
+            trie.put(bytes, 8, lookupEntry); // lookupEntry作为value
         }
         trie.compress();
         LinkedList<SparseChunkEntry> sparseChunkEntries = new LinkedList<>();
@@ -318,5 +318,157 @@ public class FPATreeV2<V> {
             }
         }
         return null;
+    }
+
+    /**
+     * 统计存储使用情况。
+     *
+     * @return 存储统计信息
+     */
+    public MemoryStats getMemoryStats() {
+        MemoryStats stats = new MemoryStats();
+
+        // 1. rootChunk: int[1024][64]
+        stats.rootChunkBytes = LAYER1_GROUP_COUNT * GROUP_SIZE * 4L;
+        stats.rootChunkCount = LAYER1_GROUP_COUNT * GROUP_SIZE;
+
+        // 2. chunkList 统计
+        stats.chunkListCount = chunkList.size();
+        for (ChunkEntry[] group : chunkList) {
+            for (ChunkEntry entry : group) {
+                // codeWords: short[8] = 16 字节
+                stats.codeWordsBytes += 16;
+                // lookupEntries: int[] 大小
+                stats.lookupEntriesBytes += entry.lookupEntries.length * 4L;
+                stats.lookupEntriesCount += entry.lookupEntries.length;
+            }
+        }
+
+        // 3. sparseChunkList 统计
+        stats.sparseChunkListCount = sparseChunkList.size();
+        for (ChunkEntry entry : sparseChunkList) {
+            // codeWords: short[] 大小
+            stats.sparseCodeWordsBytes += entry.codeWords.length * 2L;
+            // lookupEntries: int[] 大小
+            stats.sparseLookupEntriesBytes += entry.lookupEntries.length * 4L;
+            stats.sparseLookupEntriesCount += entry.lookupEntries.length;
+        }
+
+        // 4. resultList 统计
+        stats.resultListCount = resultList.size();
+        // 估算 String 存储：每个 String 对象约 40 字节 + 字符数组
+        for (V value : resultList) {
+            if (value != null) {
+                stats.resultListBytes += estimateStringSize(value.toString());
+            }
+        }
+
+        // 5. INDEX_TABLE
+        stats.indexTableBytes = 256;
+
+        return stats;
+    }
+
+    /**
+     * 估算 String 的内存占用。
+     *
+     * @param str 字符串
+     * @return 估算的字节数
+     */
+    private long estimateStringSize(String str) {
+        // Java String 对象头约 16 字节 + hash 4 字节 + 引用 4 字节 ≈ 24 字节
+        // char[] 数组头 16 字节 + 每个字符 2 字节
+        return 24 + 16 + str.length() * 2L;
+    }
+
+    /** 打印内存统计信息。 */
+    public void printMemoryStats() {
+        MemoryStats stats = getMemoryStats();
+
+        System.out.println("\n========================================");
+        System.out.println("FPATreeV2 存储统计");
+        System.out.println("========================================");
+
+        System.out.println("\n【rootChunk】Layer 1 (int[1024][64]):");
+        System.out.printf("  元素数量: %,d%n", stats.rootChunkCount);
+        System.out.printf(
+                "  存储大小: %,d bytes (%.2f KB)%n",
+                stats.rootChunkBytes, stats.rootChunkBytes / 1024.0);
+
+        System.out.println("\n【chunkList】Dense chunks (Layer 2/3):");
+        System.out.printf("  chunk 数量: %,d%n", stats.chunkListCount);
+        System.out.printf(
+                "  codeWords: %,d bytes (%.2f KB)%n",
+                stats.codeWordsBytes, stats.codeWordsBytes / 1024.0);
+        System.out.printf(
+                "  lookupEntries: %,d 个, %,d bytes (%.2f KB)%n",
+                stats.lookupEntriesCount,
+                stats.lookupEntriesBytes,
+                stats.lookupEntriesBytes / 1024.0);
+        long chunkListTotal = stats.codeWordsBytes + stats.lookupEntriesBytes;
+        System.out.printf(
+                "  chunkList 总计: %,d bytes (%.2f MB)%n",
+                chunkListTotal, chunkListTotal / (1024.0 * 1024.0));
+
+        System.out.println("\n【sparseChunkList】Sparse chunks (Layer 2/3):");
+        System.out.printf("  chunk 数量: %,d%n", stats.sparseChunkListCount);
+        System.out.printf(
+                "  codeWords: %,d bytes (%.2f KB)%n",
+                stats.sparseCodeWordsBytes, stats.sparseCodeWordsBytes / 1024.0);
+        System.out.printf(
+                "  lookupEntries: %,d 个, %,d bytes (%.2f KB)%n",
+                stats.sparseLookupEntriesCount,
+                stats.sparseLookupEntriesBytes,
+                stats.sparseLookupEntriesBytes / 1024.0);
+        long sparseChunkListTotal = stats.sparseCodeWordsBytes + stats.sparseLookupEntriesBytes;
+        System.out.printf(
+                "  sparseChunkList 总计: %,d bytes (%.2f MB)%n",
+                sparseChunkListTotal, sparseChunkListTotal / (1024.0 * 1024.0));
+
+        System.out.println("\n【resultList】值去重存储:");
+        System.out.printf("  值数量: %,d%n", stats.resultListCount);
+        System.out.printf(
+                "  存储大小: %,d bytes (%.2f MB)%n",
+                stats.resultListBytes, stats.resultListBytes / (1024.0 * 1024.0));
+
+        System.out.println("\n【INDEX_TABLE】:");
+        System.out.printf("  存储大小: %,d bytes%n", stats.indexTableBytes);
+
+        // 总计（不含 resultList）
+        long totalWithoutResult =
+                stats.rootChunkBytes
+                        + chunkListTotal
+                        + sparseChunkListTotal
+                        + stats.indexTableBytes;
+        System.out.println("\n========================================");
+        System.out.printf(
+                "总计（不含 resultList）: %,d bytes (%.2f MB)%n",
+                totalWithoutResult, totalWithoutResult / (1024.0 * 1024.0));
+        System.out.printf(
+                "总计（含 resultList）: %,d bytes (%.2f MB)%n",
+                totalWithoutResult + stats.resultListBytes,
+                (totalWithoutResult + stats.resultListBytes) / (1024.0 * 1024.0));
+        System.out.println("========================================");
+    }
+
+    /** 存储统计信息。 */
+    public static class MemoryStats {
+        public long rootChunkBytes;
+        public int rootChunkCount;
+
+        public int chunkListCount;
+        public long codeWordsBytes;
+        public long lookupEntriesBytes;
+        public int lookupEntriesCount;
+
+        public int sparseChunkListCount;
+        public long sparseCodeWordsBytes;
+        public long sparseLookupEntriesBytes;
+        public int sparseLookupEntriesCount;
+
+        public int resultListCount;
+        public long resultListBytes;
+
+        public long indexTableBytes;
     }
 }
