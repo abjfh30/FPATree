@@ -5,8 +5,12 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.Random;
 
 /** 测试 BitTrie、ForwardingPortArray 和 FPATreeV2 的查询结果一致性 */
 public class Application {
@@ -51,7 +55,8 @@ public class Application {
 
         try (BufferedReader reader =
                 new BufferedReader(
-                        new InputStreamReader(new FileInputStream(path), StandardCharsets.UTF_8))) {
+                        new InputStreamReader(
+                                Files.newInputStream(Paths.get(path)), StandardCharsets.UTF_8))) {
 
             String line;
             while ((line = reader.readLine()) != null) {
@@ -171,6 +176,34 @@ public class Application {
             }
         }
 
+        // 随机IP测试
+        System.out.println("测试随机生成的IP地址...");
+        int randomIpCount = 1_000_000; // 测试10000个随机IP
+        printed = 0;
+        Random random = new Random(2);
+        byte[] randomIp = new byte[4];
+
+        for (int i = 0; i < randomIpCount; i++) {
+            random.nextBytes(randomIp);
+            String bitTrieResult = bitTrie.get(randomIp);
+            String fpaResult = fpa.search(randomIp);
+            String fpaTreeResult = fpaTree.search(randomIp);
+
+            totalCount++;
+
+            if (resultsMatch(bitTrieResult, fpaResult, fpaTreeResult)) {
+                matchCount++;
+            } else {
+                mismatchCount++;
+                if (printed++ < maxPrint) {
+                    String ipStr = bytesToIp(randomIp);
+                    System.out.printf(
+                            "不匹配: %s | BitTrie: %s | FPA: %s | FPATreeV2: %s%n",
+                            ipStr, bitTrieResult, fpaResult, fpaTreeResult);
+                }
+            }
+        }
+
         // 输出统计结果
         System.out.println("\n========================================");
         System.out.println("测试统计:");
@@ -187,14 +220,13 @@ public class Application {
     }
 
     /** 检查三个结果是否一致 */
-    private static boolean resultsMatch(String r1, String r2, String r3) {
-        if (r1 == null && r2 == null && r3 == null) {
-            return true;
+    private static boolean resultsMatch(String... results) {
+        for (String result : results) {
+            if (!Objects.equals(result, results[0])) {
+                return false;
+            }
         }
-        if (r1 != null && r1.equals(r2) && r1.equals(r3)) {
-            return true;
-        }
-        return false;
+        return true;
     }
 
     /** 生成测试 IP 地址 */
@@ -221,6 +253,20 @@ public class Application {
         }
 
         return testIps;
+    }
+
+    /** 生成随机IP地址 */
+    private static List<byte[]> generateRandomIps(int count) {
+        List<byte[]> randomIps = new ArrayList<>();
+        Random random = new Random();
+
+        for (int i = 0; i < count; i++) {
+            byte[] ipBytes = new byte[4];
+            random.nextBytes(ipBytes);
+            randomIps.add(ipBytes);
+        }
+
+        return randomIps;
     }
 
     /** 将字节数组转换为 IP 地址字符串 */

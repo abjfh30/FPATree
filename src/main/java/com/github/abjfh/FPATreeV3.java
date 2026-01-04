@@ -424,27 +424,30 @@ public class FPATreeV3<V> {
         int bit1 = index16 & 0b111111;
 
         int entry = rootChunk[group1][bit1];
-        return resolveLookupEntryFast(entry, ipBytes, 2);
+        return resolveLookupEntryFast(entry, ipBytes);
     }
 
-    private V resolveLookupEntryFast(int lookupEntry, byte[] ipBytes, int byteIdx) {
-        int type = lookupEntry >>> 30;
-        int index = lookupEntry & 0x3FFFFFFF;
+    private V resolveLookupEntryFast(int lookupEntry, byte[] ipBytes) {
 
-        if (type == TYPE_LEAF) {
-            return resultList.get(index);
-        } else if (type == TYPE_DENSE) {
-            int base = denseChunkOffsets[index];
-            return searchInDenseChunkFast(base, ipBytes, byteIdx);
-        } else if (type == TYPE_SPARSE) {
-            int base = sparseChunkOffsets[index];
-            return searchInSparseChunkFast(base, ipBytes, byteIdx);
+        int nextLookupEntry = lookupEntry;
+        for (int i = 2; i < ipBytes.length; i++) {
+            int type = nextLookupEntry >>> 30;
+            int index = nextLookupEntry & 0x3FFFFFFF;
+
+            if (type == TYPE_LEAF) {
+                return resultList.get(index);
+            } else if (type == TYPE_DENSE) {
+                int base = denseChunkOffsets[index];
+                nextLookupEntry = searchInDenseChunkFast(base, ipBytes[i] & 0xFF);
+            } else if (type == TYPE_SPARSE) {
+                int base = sparseChunkOffsets[index];
+                nextLookupEntry = searchInSparseChunkFast(base, ipBytes[i]);
+            }
         }
-        return null;
+        return resultList.get(nextLookupEntry);
     }
 
-    private V searchInDenseChunkFast(int base, byte[] ipBytes, int byteIdx) {
-        int index8 = ipBytes[byteIdx] & 0xFF;
+    private int searchInDenseChunkFast(int base, int index8) {
         int groupIdx = index8 >> 6;
         int bitIdx = index8 & 0b111111;
 
@@ -470,13 +473,11 @@ public class FPATreeV3<V> {
         }
         lookupOffset += lookupIdx;
 
-        int lookupEntry = denseChunkData[base + lookupOffset];
-        return resolveLookupEntryFast(lookupEntry, ipBytes, byteIdx + 1);
+        return denseChunkData[base + lookupOffset];
     }
 
-    private V searchInSparseChunkFast(int base, byte[] ipBytes, int byteIdx) {
+    private int searchInSparseChunkFast(int base, byte ipByte) {
         int entryCount = sparseChunkData[base];
-        byte ipByte = ipBytes[byteIdx];
 
         for (int i = 0; i < entryCount; i++) {
             int offset = base + 1 + i * 3;
@@ -485,7 +486,7 @@ public class FPATreeV3<V> {
             int lookupEntry = sparseChunkData[offset + 2];
 
             if (prefixLen == 0) {
-                return resolveLookupEntryFast(lookupEntry, ipBytes, byteIdx + 1);
+                return lookupEntry;
             }
 
             // 修正：从高8位获取 mask，从低8位获取 prefixLen
@@ -493,10 +494,10 @@ public class FPATreeV3<V> {
             int ipPrefix = (ipByte & 0xFF) >>> (8 - prefixLen);
             int valPrefix = prefixVal >>> (8 - prefixLen);
             if (ipPrefix == valPrefix) {
-                return resolveLookupEntryFast(lookupEntry, ipBytes, byteIdx + 1);
+                return lookupEntry;
             }
         }
 
-        return null;
+        return 0;
     }
 }
