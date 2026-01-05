@@ -1,7 +1,5 @@
 package com.github.abjfh.fpa.impl;
 
-import lombok.Getter;
-
 import java.util.LinkedList;
 import java.util.Queue;
 
@@ -10,7 +8,6 @@ public class TrieToFPAConverter {
 
     private final IP_TYPE ipType;
 
-    @Getter
     public enum IP_TYPE {
         IPV4(new int[] {16, 8, 8}),
         IPV6(new int[] {16, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8});
@@ -19,6 +16,10 @@ public class TrieToFPAConverter {
 
         IP_TYPE(int[] ipDepths) {
             this.ipDepths = ipDepths;
+        }
+
+        public int[] getIpDepths() {
+            return ipDepths;
         }
     }
 
